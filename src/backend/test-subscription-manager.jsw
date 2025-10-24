@@ -1,0 +1,124 @@
+/**
+ * Test file for subscription-manager.jsw
+ * Run this to verify the subscription manager works correctly
+ */
+
+import { createSubscription, getUserSubscription, hasActiveSubscription } from './subscription-manager.jsw';
+
+export async function testSubscriptionManager(userId) {
+    console.log('=== Testing Subscription Manager ===');
+    
+    const tests = [];
+    
+    // Test 1: Create Paystack subscription (basic tier)
+    try {
+        const result1 = await createSubscription(userId, 'basic', 'paystack', 'monthly');
+        tests.push({
+            name: 'Create Paystack Basic Subscription',
+            success: result1.success,
+            details: result1
+        });
+    } catch (error) {
+        tests.push({
+            name: 'Create Paystack Basic Subscription',
+            success: false,
+            error: error.message
+        });
+    }
+    
+    // Test 2: Create PayFast subscription (premium tier)
+    try {
+        const result2 = await createSubscription(userId, 'premium', 'payfast', 'annual');
+        tests.push({
+            name: 'Create PayFast Premium Subscription',
+            success: result2.success,
+            details: result2
+        });
+    } catch (error) {
+        tests.push({
+            name: 'Create PayFast Premium Subscription',
+            success: false,
+            error: error.message
+        });
+    }
+    
+    // Test 3: Get user subscription
+    try {
+        const sub = await getUserSubscription(userId);
+        tests.push({
+            name: 'Get User Subscription',
+            success: !!sub,
+            details: sub
+        });
+    } catch (error) {
+        tests.push({
+            name: 'Get User Subscription',
+            success: false,
+            error: error.message
+        });
+    }
+    
+    // Test 4: Check active subscription
+    try {
+        const hasActive = await hasActiveSubscription(userId);
+        tests.push({
+            name: 'Has Active Subscription',
+            success: true,
+            details: { hasActive }
+        });
+    } catch (error) {
+        tests.push({
+            name: 'Has Active Subscription',
+            success: false,
+            error: error.message
+        });
+    }
+    
+    // Test 5: Invalid tier
+    try {
+        const result5 = await createSubscription(userId, 'invalid', 'paystack');
+        tests.push({
+            name: 'Invalid Tier Validation',
+            success: !result5.success, // Should fail
+            details: result5
+        });
+    } catch (error) {
+        tests.push({
+            name: 'Invalid Tier Validation',
+            success: true, // Expected to fail
+            details: 'Correctly rejected invalid tier'
+        });
+    }
+    
+    // Test 6: Invalid provider
+    try {
+        const result6 = await createSubscription(userId, 'basic', 'invalid');
+        tests.push({
+            name: 'Invalid Provider Validation',
+            success: !result6.success, // Should fail
+            details: result6
+        });
+    } catch (error) {
+        tests.push({
+            name: 'Invalid Provider Validation',
+            success: true, // Expected to fail
+            details: 'Correctly rejected invalid provider'
+        });
+    }
+    
+    console.log('=== Test Results ===');
+    tests.forEach((test, index) => {
+        console.log(`${index + 1}. ${test.name}: ${test.success ? '✅ PASS' : '❌ FAIL'}`);
+        if (test.details) console.log('   Details:', test.details);
+        if (test.error) console.log('   Error:', test.error);
+    });
+    
+    const passedTests = tests.filter(t => t.success).length;
+    console.log(`\n=== Summary: ${passedTests}/${tests.length} tests passed ===`);
+    
+    return {
+        total: tests.length,
+        passed: passedTests,
+        tests
+    };
+}

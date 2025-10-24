@@ -1,0 +1,23 @@
+import { getSecret } from 'wix-secrets-backend';
+import { fetch } from 'wix-fetch';
+
+export async function sendDiscordAlert(message) {
+    try {
+        if(!message) throw new Error("Discord message missing");
+        const url = await getSecret("discordWebhookURL");
+        if(!url) throw new Error("Discord webhook URL missing");
+
+        const res = await fetch(url, {
+            method: "post",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ content: message })
+        });
+
+        if(!res.ok) throw new Error(await res.text());
+        console.log(`✅ Discord alert sent:`, message);
+        return true;
+    } catch(err) {
+        console.error(`❌ Discord alert FAILED:`, err.message);
+        throw err;
+    }
+}

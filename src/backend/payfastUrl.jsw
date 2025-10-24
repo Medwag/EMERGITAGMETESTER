@@ -1,0 +1,191 @@
+// backend/payfastUrl.jsw
+
+import wixData from 'wix-data';
+import wixUsersBackend from 'wix-users-backend';
+import { getPayFastConfig } from 'backend/payfast-config-fixed.jsw';
+import {
+  createPayFastSignupParams,
+  generatePayFastSignature,
+  customEncode
+} from 'backend/payfastUtils.jsw';
+
+export async function generatePayFastUrl(userId, amount = 149.00) {
+  const gateway = 'payfast';
+  try {
+    const config = await getPayFastConfig();
+    
+    // Ensure all config methods return resolved values
+    let merchantId, merchantKey, passphrase, environment, baseUrl;
+    try {
+      const credentials = config.getCredentials();
+      merchantId = await Promise.resolve(credentials.merchantId);
+      merchantKey = await Promise.resolve(credentials.merchantKey);
+      passphrase = await Promise.resolve(credentials.passphrase);
+      environment = await Promise.resolve(config.getEnvironment());
+      baseUrl = await Promise.resolve(config.getPaymentUrl());
+    } catch (configError) {
+      throw new Error(`Failed to get PayFast config: ${configError.message}`);
+    }
+
+    console.log(`[PayFast:${environment}] Using Merchant ID ${merchantId}`);
+    
+    // Debug: Verify all config values are not promises
+    console.log('[PayFast DEBUG] Config values:');
+    console.log(`  merchantId: ${merchantId} (type: ${typeof merchantId}, isPromise: ${merchantId && typeof merchantId.then === 'function'})`);
+    console.log(`  merchantKey: ${String(merchantKey).substring(0, 5)}... (type: ${typeof merchantKey}, isPromise: ${merchantKey && typeof merchantKey.then === 'function'})`);
+    console.log(`  passphrase: ${passphrase ? 'present' : 'missing'} (type: ${typeof passphrase}, isPromise: ${passphrase && typeof passphrase.then === 'function'})`);
+    console.log(`  environment: ${environment} (type: ${typeof environment}, isPromise: ${environment && typeof environment.then === 'function'})`);
+    console.log(`  baseUrl: ${baseUrl} (type: ${typeof baseUrl}, isPromise: ${baseUrl && typeof baseUrl.then === 'function'})`);
+
+    let userEmail = `user_${userId}@emergitag.me`;
+    try {
+      const user = await wixUsersBackend.getUser(userId);
+      if (user?.loginEmail) userEmail = user.loginEmail;
+    } catch (e) {
+      console.warn('[PayFast] Could not get user email:', e.message);
+    }
+
+    // Build parameters and resolve any accidental Promises
+    console.log('[PayFast DEBUG] About to call createPayFastSignupParams...');
+    const rawParams = await createPayFastSignupParams(userId, userEmail, amount);
+    console.log('[PayFast DEBUG] createPayFastSignupParams returned:', rawParams);
+    
+    // EMERGENCY FIX: If rawParams contains promises, create a clean object
+    const cleanParams = {};
+    for (const [key, value] of Object.entries(rawParams)) {
+      if (value && typeof value.then === 'function') {
+        console.log(`[PayFast DEBUG] Found promise in ${key}, resolving...`);
+        cleanParams[key] = await value;
+      } else {
+        cleanParams[key] = value;
+      }
+    }
+    console.log('[PayFast DEBUG] Clean params:', cleanParams);
+    
+    // Debug: Check if rawParams contains any promises
+    console.log('[PayFast DEBUG] Raw params types:');
+    for (const [key, value] of Object.entries(rawParams)) {
+      const isPromise = value && typeof value.then === 'function';
+      console.log(`  ${key}: ${value} (type: ${typeof value}, isPromise: ${isPromise})`);
+    }
+    
+    // Use clean params instead of raw params
+    const entries = await Promise.all(
+      Object.entries(cleanParams).map(async ([k, v]) => [k, (v && typeof v.then === 'function') ? await v : v])
+    );
+    const params = Object.fromEntries(entries);
+    
+    // Debug: Check final params
+    console.log('[PayFast DEBUG] Final params types:');
+    for (const [key, value] of Object.entries(params)) {
+      const isPromise = value && typeof value.then === 'function';
+      console.log(`  ${key}: ${value} (type: ${typeof value}, isPromise: ${isPromise})`);
+    }
+
+    // Enhanced validation to address PayFast errors
+    console.log('[PayFast DEBUG] Starting enhanced validation...');
+    
+    // 1. merchant_id must be integer
+    const validMerchantId = parseInt(params.merchant_id, 10);
+    if (!validMerchantId || Number.isNaN(validMerchantId)) {
+      throw new Error(`PayFast validation error: merchant_id must be integer, got: ${params.merchant_id} -> ${validMerchantId}`);
+    }
+    params.merchant_id = validMerchantId;
+    
+    // 2. merchant_key must be 13 characters
+    const validMerchantKey = String(params.merchant_key).trim();
+    if (!validMerchantKey || validMerchantKey.length !== 13) {
+      throw new Error(`PayFast validation error: merchant_key must be 13 characters, got: ${validMerchantKey.length} chars`);
+    }
+    params.merchant_key = validMerchantKey;
+    
+    // 3. amount must be valid decimal
+    const validAmount = parseFloat(params.amount);
+    if (isNaN(validAmount) || validAmount <= 0) {
+      throw new Error(`PayFast validation error: amount must be positive number, got: ${params.amount} -> ${validAmount}`);
+    }
+    params.amount = validAmount.toFixed(2);
+    
+    // 4. item_name is required
+    const validItemName = String(params.item_name || '').trim();
+    if (!validItemName) {
+      throw new Error('PayFast validation error: item_name field is required and cannot be empty');
+    }
+    params.item_name = validItemName;
+    
+    // 5. email_address is required
+    const validEmail = String(params.email_address || '').trim();
+    if (!validEmail || !validEmail.includes('@')) {
+      throw new Error(`PayFast validation error: valid email_address required, got: ${validEmail}`);
+    }
+    params.email_address = validEmail;
+    
+    // 6. URLs are required
+    if (!params.return_url || !params.cancel_url || !params.notify_url) {
+      throw new Error('PayFast validation error: return_url, cancel_url, and notify_url are required');
+    }
+
+    console.log('[PayFast DEBUG] Enhanced validation passed:', {
+      merchant_id: params.merchant_id,
+      merchant_key: `${validMerchantKey.substring(0, 3)}...${validMerchantKey.substring(10)}`,
+      amount: params.amount,
+      item_name: params.item_name,
+      email_address: params.email_address
+    });
+
+    // Add signature
+    console.log('[PayFast DEBUG] Generating signature with passphrase:', passphrase ? 'present' : 'missing');
+    
+    // Ensure all params are strings before signature generation
+    const stringParams = {};
+    for (const [key, value] of Object.entries(params)) {
+      stringParams[key] = String(value);
+      console.log(`[PayFast DEBUG] Param ${key}: ${stringParams[key]} (original type: ${typeof value})`);
+    }
+    
+    const signature = generatePayFastSignature(stringParams, passphrase);
+    console.log('[PayFast DEBUG] Generated signature:', signature, 'type:', typeof signature);
+    params.signature = String(signature);
+
+    // Construct query string (values forced to string and encoded safely)
+    console.log('[PayFast DEBUG] Building query string from params:', Object.keys(params));
+    const queryString = Object.keys(params)
+      .sort()
+      .map((k) => {
+        const value = String(params[k]); // Ensure string
+        const encoded = customEncode(value);
+        console.log(`[PayFast DEBUG] Query param ${k}: ${value} -> ${encoded}`);
+        return `${k}=${encoded}`;
+      })
+      .join('&');
+
+    const redirectUrl = `${baseUrl}?${queryString}`;
+
+    console.log(`[PayFast:${environment}] Redirect URL ready: ${redirectUrl}`);
+
+    // Record transaction safely
+    try {
+      await wixData.insert(
+        'Payfast_Transactions',
+        {
+          userId,
+          email: userEmail,
+          gateway,
+          environment,
+          amount,
+          redirectUrl,
+          status: 'pending',
+          createdAt: new Date(),
+        },
+        { suppressAuth: true }
+      );
+    } catch (err) {
+      console.warn('[PayFast] Failed to insert transaction:', err.message);
+    }
+
+    return { success: true, redirectUrl, gateway };
+  } catch (err) {
+    console.error('[PayFast] URL generation failed:', err.message);
+    return { success: false, gateway, error: err.message };
+  }
+}

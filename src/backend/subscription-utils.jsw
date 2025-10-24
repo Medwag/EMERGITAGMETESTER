@@ -1,0 +1,22 @@
+import wixData from 'wix-data';
+import { sendDiscordAlert } from 'backend/discord-utils.jsw';
+
+export async function logSubscriptionToCMS({ userId, email, membershipTier, reference, amount }) {
+  try {
+    const record = {
+      userId,
+      email,
+      membershipTier,
+      reference,
+      amount,
+      createdAt: new Date()
+    };
+    const result = await wixData.insert('Subscriptions', record);
+    await sendDiscordAlert(`📥 Logged subscription to CMS: ${userId} (${membershipTier})`);
+    return result;
+  } catch (error) {
+    console.error('logSubscriptionToCMS() failed:', error);
+    await sendDiscordAlert(`❌ Failed to log subscription: ${error.message}`);
+    throw error;
+  }
+}

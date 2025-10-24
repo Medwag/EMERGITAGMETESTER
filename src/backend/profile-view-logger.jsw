@@ -1,0 +1,60 @@
+// backend/profile-view-logger.jsw
+import wixData from 'wix-data';
+import { fetch } from 'wix-fetch';
+import { sendWhatsAppText } from 'backend/notify.jsw';
+
+// Make sure your CMS "Profile_Views" exists with fields:
+// profileId (Reference to Emergency_Profiles), viewedAt (Date/Time),
+// viewerIp (Text), location (Text), latitude (Number), longitude (Number)
+
+export async function logProfileView(profileId) {
+  try {
+    const profile = await wixData.get('Emergency_Profiles', profileId);
+    if (!profile) {
+      console.warn('⚠️ Profile not found:', profileId);
+      return;
+    }
+
+    // Geo lookup
+    const resp = await fetch('https://ipapi.co/json/');
+    const geo = resp.ok ? await resp.json() : {};
+    const ip = geo?.ip || 'N/A';
+    const city = geo?.city || 'Unknown City';
+    const region = geo?.region || '';
+    const country = geo?.country_name || 'Unknown Country';
+    const lat = typeof geo?.latitude === 'number' ? geo.latitude : undefined;
+    const lon = typeof geo?.longitude === 'number' ? geo.longitude : undefined;
+    const location = [city, region, country].filter(Boolean).join(', ');
+
+    // Message
+    const when = new Date().toLocaleString('en-ZA', { timeZone: 'Africa/Johannesburg' });
+    const msg =
+`🚨 Emergency Profile Viewed
+Name: ${profile.fullName || 'EmergiTag member'}
+Profile ID: ${profile.publicViewId || profile._id}
+📍 ${location}
+🌐 IP: ${ip}
+📅 ${when}
+(Approximate location from IP)`;
+
+    // Send to primary & additional numbers if present
+    const toNumbers = [profile.whatsappPhoneInputPrimary, profile.whatsappPhoneInputAdditional].filter(Boolean);
+    for (const to of toNumbers) {
+      await sendWhatsAppText(to, msg);
+    }
+
+    // Save view record
+    await wixData.insert('Profile_Views', {
+      profileId,
+      viewedAt: new Date(),
+      viewerIp: ip,
+      location,
+      latitude: lat,
+      longitude: lon
+    });
+
+    console.log('✅ View logged + alerts sent for profile', profileId);
+  } catch (err) {
+    console.error('❌ logProfileView error:', err);
+  }
+}

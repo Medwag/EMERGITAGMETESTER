@@ -1,0 +1,54 @@
+import { getPayFastConfig } from 'backend/payfast-config.jsw';
+
+// Safe crypto import - only load when needed
+let crypto = null;
+async function getCrypto() {
+    if (!crypto) {
+        try {
+            crypto = await import('crypto');
+            return crypto;
+        } catch (err) {
+            console.error('❌ Crypto module not available for PayFast validation:', err.message);
+            throw new Error('Crypto module required for PayFast signature validation');
+        }
+    }
+    return crypto;
+}
+
+export async function validatePayFastIPN(params) {
+  const config = await getPayFastConfig();
+  const { passphrase } = config.getCredentials();
+
+  // 1. Clone and exclude signature
+  const clonedParams = { ...params };
+  delete clonedParams.signature;
+
+  // 2. Sort keys alphabetically
+  const sortedKeys = Object.keys(clonedParams).sort();
+
+  // 3. Build string
+  let signatureString = "";
+  for (let key of sortedKeys) {
+    if (clonedParams[key] !== "") {
+      signatureString += `${key}=${encodeURIComponent(clonedParams[key]).replace(/%20/g, "+")}&`;
+    }
+  }
+
+  signatureString = signatureString.slice(0, -1); // Remove last '&'
+
+  // 4. Append passphrase if available
+  if (passphrase) {
+    signatureString += `&passphrase=${encodeURIComponent(passphrase).replace(/%20/g, "+")}`;
+  }
+
+  console.log("🔍 Signature base string:", signatureString);
+
+  // 5. Generate MD5 hash using node crypto
+  const cryptoModule = await getCrypto();
+  const expectedSignature = cryptoModule.createHash('md5').update(signatureString).digest('hex');
+
+  console.log("✅ Expected Signature:", expectedSignature);
+  console.log("📦 Submitted Signature:", params.signature);
+
+  return expectedSignature === params.signature;
+}

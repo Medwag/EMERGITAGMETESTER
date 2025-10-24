@@ -1,0 +1,167 @@
+// ✅ backend/email-utils.jsw
+import { verifyPaystackPayment } from 'backend/paystack-utils.jsw';
+import wixCrmBackend from 'wix-crm-backend';
+import wixUsersBackend from 'wix-users-backend';
+import { triggeredEmails } from 'wix-crm-backend';
+import wixData from 'wix-data';
+import { getSecret } from 'wix-secrets-backend'; // ✅ Added for secrets
+
+const EMAIL_TEMPLATE_IDS = {
+    welcome: "UsUBlWl",
+    adminNotify: "YOUR_ADMIN_NOTIFY_TEMPLATE_ID", // 👈 Replace with your actual template ID
+    signupPaid: "UrDYTwt",
+    subscriptionActive: "UrJWQIe",
+};
+
+// ✅ Utility: Get contactId and email from a userId
+export async function getContactIdAndEmailFromUser(userId) {
+    let contactId = null;
+    let email = null;
+
+    try {
+        const user = await wixUsersBackend.getUser(userId);
+        const userEmail = user?.loginEmail;
+
+        if (userEmail) {
+            email = userEmail;
+
+            const { items } = await wixData.query("Emergency_Profiles")
+                .eq("emails.email", email)
+                .limit(1)
+                .find();
+
+            if (items.length > 0) {
+                contactId = items[0]._id;
+            }
+        }
+
+        if (!contactId) console.warn("⚠️ No contact ID found for userId:", userId);
+        if (!email) console.warn("⚠️ No email found for userId:", userId);
+
+        return { contactId, email };
+
+    } catch (err) {
+        console.error("❌ getContactIdAndEmailFromUser error:", err);
+        return { contactId: null, email: null };
+    }
+}
+
+// ✅ Utility: Send email to a specific contact
+export async function sendEmail(contactId, templateId, data = {}) {
+    try {
+        const response = await triggeredEmails.emailContact(templateId, contactId, { variables: data });
+        console.log(`✅ Email sent: Template ${templateId} → Contact ${contactId}`);
+        return response;
+    } catch (err) {
+        console.error(`❌ Failed to send email ${templateId} to ${contactId}:`, err);
+        return { error: true, message: err.message };
+    }
+}
+
+// ✅ Utility: Get multiple admin contact IDs from Wix Secrets Manager
+async function getAdminContactIds() {
+    try {
+        const contactIdString = await getSecret("adminContactIds"); // e.g. "abc123,def456"
+        const ids = contactIdString.split(",").map(id => id.trim()).filter(id => id.length > 0);
+        if (!ids.length) {
+            console.warn("⚠️ No admin contact IDs found in secrets.");
+        }
+        return ids;
+    } catch (err) {
+        console.error("❌ Failed to load admin contact IDs from secrets:", err);
+        return [];
+    }
+}
+
+// ✅ Utility: Send email to multiple contacts
+async function sendEmailToMultiple(contactIds, templateId, data = {}) {
+    const results = await Promise.all(
+        contactIds.map(contactId => sendEmail(contactId, templateId, data))
+    );
+    return results;
+}
+
+// ✅ Send welcome email after signup
+export async function sendWelcomeEmailToClient(userId) {
+    const { contactId } = await getContactIdAndEmailFromUser(userId);
+    if (contactId && EMAIL_TEMPLATE_IDS.welcome) {
+        return sendEmail(contactId, EMAIL_TEMPLATE_IDS.welcome);
+    }
+    console.warn("❌ Welcome email to client could not be sent. Missing contactId or template ID.");
+}
+
+// ✅ Notify admin of new profile event
+export async function notifyAdminOfNewProfile(email, userId, message = "A new profile related event occurred.") {
+    if (!EMAIL_TEMPLATE_IDS.adminNotify) {
+        console.warn("❌ Admin notify email template ID is missing.");
+        return;
+    }
+
+    const contactIds = await getAdminContactIds();
+    if (!contactIds.length) return;
+
+    const profileLink = `https://www.wix.com/my-account/site-members/${userId}`;
+
+    return sendEmailToMultiple(contactIds, EMAIL_TEMPLATE_IDS.adminNotify, {
+        eventName: message,
+        memberEmail: email,
+        memberId: userId,
+        profileLink: profileLink
+    });
+}
+
+// ✅ Email client after signup payment
+export async function emailClientSignupPaid(userId) {
+    const { contactId } = await getContactIdAndEmailFromUser(userId);
+    if (contactId && EMAIL_TEMPLATE_IDS.signupPaid) {
+        return sendEmail(contactId, EMAIL_TEMPLATE_IDS.signupPaid);
+    }
+    console.warn("❌ Signup paid email could not be sent. Missing contactId or template ID.");
+}
+
+// ✅ Email client when subscription is activated
+export async function emailClientSubscriptionActive(userId, planName = "") {
+    const { contactId } = await getContactIdAndEmailFromUser(userId);
+    if (contactId && EMAIL_TEMPLATE_IDS.subscriptionActive) {
+        return sendEmail(contactId, EMAIL_TEMPLATE_IDS.subscriptionActive, {
+            planName
+        });
+    }
+    console.warn("❌ Subscription active email could not be sent. Missing contactId or template ID.");
+}
+
+// ✅ Send subscription confirmation email with plan/payment info
+export async function sendSubscriptionConfirmationEmail(clientEmail, clientName, planName, amount) {
+    const { items } = await wixData.query("Emergency_Profiles")
+        .eq("emails.email", clientEmail)
+        .limit(1)
+        .find();
+
+    const contactId = items.length > 0 ? items[0]._id : null;
+
+    if (contactId && EMAIL_TEMPLATE_IDS.subscriptionActive) {
+        return sendEmail(contactId, EMAIL_TEMPLATE_IDS.subscriptionActive, {
+            clientName: clientName,
+            planName: planName,
+            amount: amount ? amount.toFixed(2) : "N/A"
+        });
+    }
+    console.warn("❌ Subscription confirmation email could not be sent. Missing contactId or template ID.");
+}
+
+// ✅ Notify admins of a new payment
+export async function notifyAdminOfPayment(type, userEmail, amount) {
+    if (!EMAIL_TEMPLATE_IDS.adminNotify) {
+        console.warn("❌ Admin notify email template ID is missing.");
+        return;
+    }
+
+    const contactIds = await getAdminContactIds();
+    if (!contactIds.length) return;
+
+    return sendEmailToMultiple(contactIds, EMAIL_TEMPLATE_IDS.adminNotify, {
+        eventName: `New EmergiTag ${type} Payment!`,
+        memberEmail: userEmail,
+        amount: amount ? amount.toFixed(2) : "N/A"
+    });
+}

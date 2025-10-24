@@ -1,0 +1,120 @@
+// PayFast Environment Manager - Switch between sandbox and live
+import { getPayFastConfig } from 'backend/payfast-config-fixed.jsw';
+
+export async function getPayFastEnvironmentInfo() {
+  console.log('📊 PayFast Environment Information');
+  console.log('==================================');
+  
+  try {
+    const config = await getPayFastConfig();
+    const summary = config.getConfigSummary();
+    
+    console.log('Environment:', summary.environment);
+    console.log('Payment URL:', summary.paymentUrl);
+    console.log('Merchant ID:', summary.merchantId);
+    console.log('Merchant Key Length:', summary.merchantKeyLength);
+    console.log('Has Passphrase:', summary.hasPassphrase);
+    console.log('Is Sandbox:', summary.environment === 'sandbox');
+    
+    return {
+      success: true,
+      environment: summary.environment,
+      paymentUrl: summary.paymentUrl,
+      merchantId: summary.merchantId,
+      isSandbox: summary.environment === 'sandbox',
+      isLive: summary.environment === 'live',
+      summary
+    };
+    
+  } catch (error) {
+    console.error('Failed to get environment info:', error);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+
+export async function validateLiveSetup() {
+  console.log('🔍 Validating Live PayFast Setup');
+  console.log('=================================');
+  
+  try {
+    const info = await getPayFastEnvironmentInfo();
+    
+    if (!info.success) {
+      return { success: false, error: info.error };
+    }
+    
+    const checks = [];
+    
+    // Check 1: Environment is set to live
+    checks.push({
+      name: 'Environment Setting',
+      status: info.isLive ? 'PASS' : 'FAIL',
+      message: info.isLive ? 'Environment is set to LIVE' : `Environment is set to ${info.environment} (should be 'live')`,
+      fix: info.isLive ? null : 'Set payfastEnvironment secret to "live"'
+    });
+    
+    // Check 2: Payment URL is live
+    checks.push({
+      name: 'Payment URL',
+      status: info.paymentUrl.includes('www.payfast.co.za') ? 'PASS' : 'FAIL',
+      message: `Payment URL: ${info.paymentUrl}`,
+      fix: info.paymentUrl.includes('www.payfast.co.za') ? null : 'Environment should switch URL automatically'
+    });
+    
+    // Check 3: Merchant ID is not sandbox (10000100)
+    checks.push({
+      name: 'Merchant ID',
+      status: info.merchantId !== 10000100 ? 'PASS' : 'FAIL',
+      message: `Merchant ID: ${info.merchantId}`,
+      fix: info.merchantId === 10000100 ? 'Update payfast_merchant_id secret with your LIVE merchant ID' : null
+    });
+    
+    // Check 4: Merchant key length
+    checks.push({
+      name: 'Merchant Key',
+      status: info.summary.merchantKeyLength === 13 ? 'PASS' : 'FAIL',
+      message: `Merchant Key Length: ${info.summary.merchantKeyLength} characters`,
+      fix: info.summary.merchantKeyLength !== 13 ? 'Update payfast_merchant_key secret with 13-character LIVE key' : null
+    });
+    
+    // Check 5: Passphrase present
+    checks.push({
+      name: 'Passphrase',
+      status: info.summary.hasPassphrase ? 'PASS' : 'WARNING',
+      message: info.summary.hasPassphrase ? 'Passphrase is configured' : 'No passphrase configured',
+      fix: info.summary.hasPassphrase ? null : 'Consider setting payfast_passphrase secret for extra security'
+    });
+    
+    const failedChecks = checks.filter(check => check.status === 'FAIL');
+    const warningChecks = checks.filter(check => check.status === 'WARNING');
+    
+    console.log('\nValidation Results:');
+    checks.forEach(check => {
+      const icon = check.status === 'PASS' ? '✅' : check.status === 'FAIL' ? '❌' : '⚠️';
+      console.log(`${icon} ${check.name}: ${check.message}`);
+      if (check.fix) {
+        console.log(`   Fix: ${check.fix}`);
+      }
+    });
+    
+    return {
+      success: true,
+      isReadyForLive: failedChecks.length === 0,
+      checks,
+      failedChecks,
+      warningChecks,
+      environment: info.environment,
+      paymentUrl: info.paymentUrl
+    };
+    
+  } catch (error) {
+    console.error('Validation failed:', error);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}

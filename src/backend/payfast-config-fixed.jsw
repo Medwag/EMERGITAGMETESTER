@@ -1,0 +1,122 @@
+// backend/payfast-config-fixed.jsw
+import { getSecret } from 'wix-secrets-backend';
+
+class PayFastConfig {
+  constructor() {
+    this.isInitialized = false;
+    this.config = {
+      merchantId: null,
+      merchantKey: null,
+      passphrase: '',
+      environment: 'live',
+      urls: {
+        sandbox: 'https://sandbox.payfast.co.za/eng/process',
+        live: 'https://www.payfast.co.za/eng/process',
+      },
+    };
+  }
+
+  async initialize() {
+    try {
+      // Determine environment (default to sandbox for testing)
+      try {
+        const envSecret = await getSecret('payfastEnvironment');
+        this.config.environment =
+          envSecret && envSecret.toLowerCase() === 'live'
+            ? 'live'
+            : 'sandbox';  // Default to sandbox unless explicitly set to 'live'
+      } catch {
+        this.config.environment = 'sandbox';  // Default to sandbox for safety
+      }
+
+      // Load secrets
+      const merchantId = await getSecret('payfast_merchant_id');
+      const merchantKey = await getSecret('payfast_merchant_key');
+      const passphrase = await getSecret('payfast_passphrase');
+
+      this.config.merchantId = parseInt(merchantId, 10);
+      this.config.merchantKey = merchantKey;
+      this.config.passphrase = passphrase || '';
+
+      this.validateCredentials();
+      this.isInitialized = true;
+    } catch (err) {
+      console.error('[PayFastConfig] Initialization failed:', err);
+      throw err;
+    }
+  }
+
+  validateCredentials() {
+    const { merchantId, merchantKey } = this.config;
+    // merchantId must be a positive integer
+    if (!Number.isInteger(merchantId) || merchantId <= 0) {
+      throw new Error('Invalid PayFast merchant ID');
+    }
+    // merchantKey must be exactly 13 characters per PayFast spec
+    if (typeof merchantKey !== 'string' || merchantKey.length !== 13) {
+      throw new Error('Invalid PayFast merchant key (must be 13 characters)');
+    }
+  }
+
+  ensureInitialized() {
+    if (!this.isInitialized) {
+      throw new Error('PayFast configuration not initialized');
+    }
+  }
+
+  getPaymentUrl() {
+    this.ensureInitialized();
+    return this.config.urls[this.config.environment];
+  }
+
+  getEnvironment() {
+    this.ensureInitialized();
+    return this.config.environment;
+  }
+
+  getCredentials() {
+    this.ensureInitialized();
+    const { merchantId, merchantKey, passphrase } = this.config;
+    return { merchantId, merchantKey, passphrase };
+  }
+
+  isSandbox() {
+    this.ensureInitialized();
+    return this.config.environment === 'sandbox';
+  }
+
+  getConfigSummary() {
+    this.ensureInitialized();
+    return {
+      environment: this.config.environment,
+      merchantId: this.config.merchantId,
+      merchantKeyLength: this.config.merchantKey?.length || 0,
+      hasPassphrase: !!this.config.passphrase,
+      paymentUrl: this.getPaymentUrl(),
+    };
+  }
+}
+
+const payfastConfig = new PayFastConfig();
+
+export async function getPayFastConfig() {
+  if (!payfastConfig.isInitialized) {
+    await payfastConfig.initialize();
+  }
+  return payfastConfig;
+}
+
+export async function getPayFastCredentials() {
+  const cfg = await getPayFastConfig();
+  return cfg.getCredentials();
+}
+
+export async function getPayFastPaymentUrl() {
+  const cfg = await getPayFastConfig();
+  return cfg.getPaymentUrl();
+}
+
+export async function isPayFastSandbox() {
+  const cfg = await getPayFastConfig();
+  return cfg.isSandbox();
+}

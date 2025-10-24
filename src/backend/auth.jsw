@@ -1,0 +1,7 @@
+// backend/auth.jsw
+import { currentUser } from 'wix-users-backend';
+
+export async function isAdmin() {
+  const roles = await currentUser.getRoles();
+  return roles.some(role => role.name === "Admin"); // Adjust role name if needed
+}

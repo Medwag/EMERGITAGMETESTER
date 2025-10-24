@@ -1,0 +1,108 @@
+// backend/payfast-simple.jsw
+// Simplified PayFast payment creation with no promises
+
+import { getSecret } from 'wix-secrets-backend';
+import crypto from 'crypto';
+
+/**
+ * Simple PayFast URL generator with explicit promise resolution
+ */
+export async function createSimplePayfastPayment(userId, email) {
+    console.log('🚨🚨🚨 SIMPLE PAYFAST FUNCTION CALLED 🚨🚨🚨');
+    console.log('🚨🚨🚨 TIMESTAMP:', new Date().toISOString());
+    console.log('🚨🚨🚨 USERID:', userId, 'EMAIL:', email);
+    
+    try {
+        console.log('🔧 Simple PayFast: Starting payment creation...');
+        
+        // Step 1: Get credentials directly from secrets
+        const merchantId = await getSecret('payfast_merchant_id');
+        const merchantKey = await getSecret('payfast_merchant_key');
+        const passphrase = await getSecret('payfast_passphrase') || '';
+        
+        console.log(`🔧 Simple PayFast: Got credentials - merchantId: ${merchantId}, merchantKey: ${merchantKey?.substring(0, 5)}...`);
+        
+        if (!merchantId || !merchantKey) {
+            throw new Error('PayFast credentials missing from secrets');
+        }
+        
+        // Step 2: Create data object with explicit string conversion
+        const data = {};
+        data.merchant_id = String(merchantId);
+        data.merchant_key = String(merchantKey);
+        data.return_url = 'https://www.emergitag.me/signup-success';
+        data.cancel_url = 'https://www.emergitag.me/signup-cancelled';
+        data.notify_url = 'https://www.emergitag.me/_functions/payfastItn';
+        data.name_first = 'EmergiTag';
+        data.name_last = 'Member';
+        data.email_address = String(email || 'test@emergitag.me');
+        data.m_payment_id = String(userId || 'test-user');
+        data.amount = '149.00';
+        data.item_name = 'EmergiTag Signup Fee';
+        data.item_description = 'EmergiTag Signup Fee';
+        
+        console.log('🔧 Simple PayFast: Data object created');
+        
+        // Step 3: Log each value to verify no promises
+        for (const [key, value] of Object.entries(data)) {
+            console.log(`  ${key}: ${value} (type: ${typeof value}, isPromise: ${value instanceof Promise})`);
+            if (value instanceof Promise) {
+                throw new Error(`Promise detected in data.${key}!`);
+            }
+        }
+        
+        // Step 4: Generate signature
+        const sortedKeys = Object.keys(data).sort();
+        const signatureString = sortedKeys
+            .map(key => `${key}=${encodeURIComponent(data[key]).replace(/%20/g, '+')}`)
+            .join('&');
+        
+        const finalString = passphrase 
+            ? `${signatureString}&passphrase=${encodeURIComponent(passphrase).replace(/%20/g, '+')}`
+            : signatureString;
+        
+        const signature = crypto.createHash('md5').update(finalString, 'utf8').digest('hex');
+        console.log(`🔧 Simple PayFast: Signature generated: ${signature}`);
+        
+        // Step 5: Build URL
+        const queryString = sortedKeys
+            .map(key => `${key}=${encodeURIComponent(data[key]).replace(/%20/g, '+')}`)
+            .join('&') + `&signature=${signature}`;
+        
+        const baseUrl = 'https://www.payfast.co.za/eng/process';
+        const finalUrl = `${baseUrl}?${queryString}`;
+        
+        console.log('✅ Simple PayFast: URL generated successfully');
+        console.log(`📤 Simple PayFast URL: ${finalUrl}`);
+        
+        // Final verification
+        if (finalUrl.includes('[object Promise]')) {
+            throw new Error('❌ URL contains [object Promise] - this should not happen!');
+        }
+        
+        return finalUrl;
+        
+    } catch (error) {
+        console.error('❌ Simple PayFast error:', error.message);
+        throw error;
+    }
+}
+
+/**
+ * Test function to verify simple PayFast works
+ */
+export async function testSimplePayfast() {
+    try {
+        const url = await createSimplePayfastPayment('test-user-123', 'test@emergitag.me');
+        return {
+            success: true,
+            url,
+            hasPromises: url.includes('[object Promise]')
+        };
+    } catch (error) {
+        return {
+            success: false,
+            error: error.message
+        };
+    }
+}

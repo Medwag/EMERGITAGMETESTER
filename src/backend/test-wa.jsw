@@ -1,0 +1,31 @@
+// backend/test-wa.jsw
+import { sendWhatsAppAlert } from 'backend/notify.jsw';
+
+export async function testWhatsAppSend() {
+    const testNumber = "27123456789"; // Replace with a valid SA number in Meta format
+    const testMsg = "🚀 Test WhatsApp from EmergiTag — this confirms the send works.";
+
+    console.log("📌 Starting WhatsApp test send...");
+
+    try {
+        if (!testNumber) {
+            console.warn("⚠️ No phone number provided.");
+            return { success: false, error: "No phone number" };
+        }
+
+        if (!testMsg) {
+            console.warn("⚠️ No message provided.");
+            return { success: false, error: "No message" };
+        }
+
+        console.log("📌 Attempting to send to:", testNumber);
+        const result = await sendWhatsAppAlert(testNumber, testMsg);
+
+        console.log("✅ WhatsApp test send result:", result);
+        return { success: true, result };
+
+    } catch (err) {
+        console.error("❌ WhatsApp test send failed:", err);
+        return { success: false, error: err.message };
+    }
+}

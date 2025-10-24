@@ -1,0 +1,32 @@
+// Filename: backend/memberUtils.jsw
+// Correctly import the 'members' object from the backend members API
+import { members } from 'wix-members-backend'; 
+
+/**
+ * @function getMemberDetails
+ * @description Retrieves detailed member information from the backend.
+ * @param {string} memberId - The ID of the member to retrieve.
+ * @returns {Promise<object|null>} A promise that resolves to the member object or null if not found.
+ */
+export async function getMemberDetails(_owner) {
+    try {
+        // Use the 'members' object to call getMember function
+        const member = await members.getMember(_owner); 
+        if (member) {
+            console.log("DEBUG Backend (memberUtils): Successfully retrieved member:", member._id); // Use member._id for logging
+            // Return only necessary properties to the frontend
+            return {
+                id: member._id, // Corrected: Use _id for the member's ID
+                loginEmail: member.loginEmail, 
+                signupDate: member.signupDate, 
+                // Add any other properties you need from the member object
+            };
+        } else {
+            console.warn("DEBUG Backend (memberUtils): Member not found for ID:", _owner);
+            return null;
+        }
+    } catch (error) {
+        console.error("DEBUG Backend (memberUtils): Error getting member details for ID:", _owner, error);
+        throw new Error("Failed to retrieve member details."); // Re-throw to be caught on frontend
+    }
+}

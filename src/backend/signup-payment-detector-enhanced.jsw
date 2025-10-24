@@ -1,0 +1,412 @@
+// backend/signup-payment-detector-enhanced.jsw
+// Enhanced Paystack-focused signup payment detection
+import { getPaystackSecretKey } from 'backend/paystack-config.jsw';
+import { fetch } from 'wix-fetch';
+import wixData from 'wix-data';
+
+/**
+ * Generate standardized signup payment reference for Paystack
+ * @param {string} userId - User's ID
+ * @param {string} email - User's email
+ * @returns {string} - Standardized reference
+ */
+export function generatePaystackSignupReference(userId, email) {
+    const timestamp = Date.now();
+    const emailPrefix = email.split('@')[0].substring(0, 5).toUpperCase();
+    return `EMERGI_SIGNUP_${emailPrefix}_${userId}_${timestamp}`;
+}
+
+/**
+ * Parse signup reference to extract information
+ * @param {string} reference - Payment reference
+ * @returns {object} - Parsed reference info
+ */
+export function parseSignupReference(reference) {
+    if (!reference) return { isSignup: false };
+    
+    const ref = reference.toLowerCase();
+    
+    // Check for standardized EmergiTag format
+    const standardMatch = reference.match(/^EMERGI_SIGNUP_([A-Z0-9]+)_(.+)_(\d+)$/);
+    if (standardMatch) {
+        return {
+            isSignup: true,
+            emailPrefix: standardMatch[1],
+            userId: standardMatch[2],
+            timestamp: parseInt(standardMatch[3]),
+            isStandardized: true,
+            confidence: 'high'
+        };
+    }
+    
+    // Check for any signup indicators
+    const signupIndicators = [
+        'emergi', 'signup', 'sign-up', 'registration', 
+        'emeritag', 'access', 'onboard'
+    ];
+    
+    const hasSignupIndicator = signupIndicators.some(indicator => 
+        ref.includes(indicator)
+    );
+    
+    return {
+        isSignup: hasSignupIndicator,
+        emailPrefix: null,
+        userId: null,
+        timestamp: null,
+        isStandardized: false,
+        confidence: hasSignupIndicator ? 'medium' : 'low'
+    };
+}
+
+/**
+ * Enhanced Paystack signup payment detection
+ * @param {string} userEmail - User's email address
+ * @param {string} userId - User's ID  
+ * @returns {Promise<object>} - Payment detection result
+ */
+export async function detectExistingSignupPayment(userEmail, userId) {
+    console.log(`[Enhanced SignupDetector] Checking for existing signup payment for ${userEmail}`);
+    
+    const result = {
+        success: false,
+        hasPaidSignup: false,
+        paymentReference: null,
+        paymentMethod: null,
+        paymentDetails: null,
+        shouldSkipPayment: false,
+        message: '',
+        confidence: 'low'
+    };
+
+    try {
+        // Step 1: Check CMS Emergency_Profiles first (fastest)
+        console.log(`[Enhanced SignupDetector] Step 1: Checking CMS records...`);
+        const cmsResult = await checkCMSSignupPayment(userId);
+        
+        if (cmsResult.hasPaidSignup) {
+            result.success = true;
+            result.hasPaidSignup = true;
+            result.paymentReference = cmsResult.paymentReference || cmsResult.signUpReference;
+            result.paymentMethod = 'cms';
+            result.paymentDetails = cmsResult;
+            result.shouldSkipPayment = true;
+            result.message = 'Signup payment already recorded in CMS';
+            result.confidence = 'high';
+            console.log(`[Enhanced SignupDetector] ✅ Found existing payment in CMS:`, cmsResult);
+            return result;
+        }
+
+        // Step 2: Enhanced Paystack transaction search
+        console.log(`[Enhanced SignupDetector] Step 2: Checking Paystack transactions...`);
+        const paystackResult = await enhancedPaystackSignupSearch(userEmail, userId);
+        
+        if (paystackResult.hasPaidSignup) {
+            result.success = true;
+            result.hasPaidSignup = true;
+            result.paymentReference = paystackResult.paymentReference;
+            result.paymentMethod = 'paystack';
+            result.paymentDetails = paystackResult;
+            result.shouldSkipPayment = true;
+            result.message = 'Signup payment found in Paystack - will sync to CMS';
+            result.confidence = paystackResult.confidence || 'medium';
+            console.log(`[Enhanced SignupDetector] ✅ Found existing Paystack payment:`, paystackResult);
+            return result;
+        }
+
+        // Step 3: No payment found
+        result.success = true;
+        result.hasPaidSignup = false;
+        result.shouldSkipPayment = false;
+        result.message = 'No existing signup payment found - Paystack payment required';
+        result.confidence = 'high';
+        console.log(`[Enhanced SignupDetector] ℹ️ No existing payment found - new Paystack payment required`);
+        return result;
+
+    } catch (err) {
+        console.error(`[Enhanced SignupDetector] ❌ Error checking existing payments:`, err);
+        result.success = false;
+        result.message = `Error checking existing payments: ${err.message}`;
+        result.confidence = 'low';
+        return result;
+    }
+}
+
+/**
+ * Enhanced Paystack signup payment search with multiple strategies
+ * @param {string} userEmail - User's email
+ * @param {string} userId - User's ID (for additional filtering)
+ * @returns {Promise<object>} - Enhanced search result
+ */
+async function enhancedPaystackSignupSearch(userEmail, userId) {
+    try {
+        const secretKey = await getPaystackSecretKey();
+        
+        // Search with larger result set for better coverage
+        const response = await fetch(`https://api.paystack.co/transaction?customer=${encodeURIComponent(userEmail)}&status=success&per_page=100`, {
+            method: 'GET',
+            headers: {
+                'Authorization': `Bearer ${secretKey}`,
+                'Content-Type': 'application/json'
+            }
+        });
+
+        if (!response.ok) {
+            throw new Error(`Paystack API error: ${response.status}`);
+        }
+
+        const data = await response.json();
+        
+        if (!data.data || data.data.length === 0) {
+            console.log(`[Enhanced SignupDetector] No Paystack transactions found for ${userEmail}`);
+            return { hasPaidSignup: false };
+        }
+
+        console.log(`[Enhanced SignupDetector] Found ${data.data.length} Paystack transactions to analyze`);
+
+        // Enhanced multi-strategy analysis
+        const signupTransactions = data.data.filter(transaction => {
+            const analysis = analyzeTransactionForSignup(transaction, userId);
+            return analysis.isSignupPayment;
+        });
+
+        if (signupTransactions.length === 0) {
+            console.log(`[Enhanced SignupDetector] No signup transactions identified from ${data.data.length} total transactions`);
+            return { hasPaidSignup: false };
+        }
+
+        // Select the best signup transaction (most recent with highest confidence)
+        const bestTransaction = signupTransactions.sort((a, b) => {
+            const aAnalysis = analyzeTransactionForSignup(a, userId);
+            const bAnalysis = analyzeTransactionForSignup(b, userId);
+            
+            // Sort by confidence first, then by date
+            if (aAnalysis.confidenceScore !== bAnalysis.confidenceScore) {
+                return bAnalysis.confidenceScore - aAnalysis.confidenceScore;
+            }
+            return new Date(b.paid_at) - new Date(a.paid_at);
+        })[0];
+
+        const analysis = analyzeTransactionForSignup(bestTransaction, userId);
+        
+        console.log(`[Enhanced SignupDetector] Selected transaction:`, {
+            reference: bestTransaction.reference,
+            amount: bestTransaction.amount / 100,
+            confidence: analysis.confidence,
+            reasons: analysis.matchReasons
+        });
+
+        return {
+            hasPaidSignup: true,
+            paymentReference: bestTransaction.reference,
+            paymentDate: new Date(bestTransaction.paid_at),
+            amount: bestTransaction.amount / 100,
+            customerCode: bestTransaction.customer?.customer_code || null,
+            customerEmail: bestTransaction.customer?.email || userEmail,
+            paymentMethod: 'paystack',
+            transaction: bestTransaction,
+            transactionId: bestTransaction.id,
+            authorizationCode: bestTransaction.authorization?.authorization_code || null,
+            confidence: analysis.confidence,
+            matchReasons: analysis.matchReasons
+        };
+
+    } catch (err) {
+        console.error(`[Enhanced SignupDetector] Paystack search failed:`, err);
+        return { hasPaidSignup: false, error: err.message };
+    }
+}
+
+/**
+ * Analyze a transaction to determine if it's a signup payment
+ * @param {object} transaction - Paystack transaction
+ * @param {string} userId - User's ID for additional validation
+ * @returns {object} - Analysis result with confidence scoring
+ */
+function analyzeTransactionForSignup(transaction, userId) {
+    const metadata = transaction.metadata || {};
+    const reference = (transaction.reference || '').toLowerCase();
+    const description = (metadata.description || transaction.description || '').toLowerCase();
+    const amount = transaction.amount / 100; // Convert from kobo
+    
+    let confidenceScore = 0;
+    const matchReasons = [];
+    
+    // Strategy 1: Explicit signup metadata (highest confidence)
+    if (metadata.payment_type === 'signup' || metadata.type === 'signup') {
+        confidenceScore += 100;
+        matchReasons.push('explicit_signup_metadata');
+    }
+    
+    // Strategy 2: Reference analysis
+    const refAnalysis = parseSignupReference(transaction.reference);
+    if (refAnalysis.isSignup) {
+        if (refAnalysis.isStandardized) {
+            confidenceScore += 90;
+            matchReasons.push('standardized_reference');
+        } else if (refAnalysis.confidence === 'high') {
+            confidenceScore += 70;
+            matchReasons.push('strong_reference_match');
+        } else {
+            confidenceScore += 40;
+            matchReasons.push('weak_reference_match');
+        }
+    }
+    
+    // Strategy 3: Amount-based detection (common signup fee amounts in ZAR)
+    const commonSignupAmounts = [5, 10, 15, 20, 25, 49, 50, 99, 100, 149];
+    if (commonSignupAmounts.includes(amount)) {
+        confidenceScore += 30;
+        matchReasons.push(`signup_amount_${amount}ZAR`);
+    } else if (amount >= 5 && amount <= 200) { // Expanded range to include R149
+        confidenceScore += 15;
+        matchReasons.push('signup_range_amount');
+    }
+    
+    // Strategy 4: One-time payment indicators
+    if (!metadata.subscription_code && !metadata.subscription_id && !reference.includes('sub_')) {
+        confidenceScore += 20;
+        matchReasons.push('one_time_payment');
+    }
+    
+    // Strategy 5: Description analysis
+    const signupKeywords = ['signup', 'sign up', 'registration', 'emergi', 'access fee', 'onboard'];
+    const hasSignupKeyword = signupKeywords.some(keyword => description.includes(keyword));
+    if (hasSignupKeyword) {
+        confidenceScore += 25;
+        matchReasons.push('description_keyword_match');
+    }
+    
+    // Strategy 6: Date proximity to account creation (if available)
+    // This would require additional data about when the user registered
+    
+    // Determine final confidence level
+    let confidence = 'low';
+    if (confidenceScore >= 80) confidence = 'high';
+    else if (confidenceScore >= 50) confidence = 'medium';
+    
+    const isSignupPayment = confidenceScore >= 40; // Minimum threshold
+    
+    return {
+        isSignupPayment,
+        confidence,
+        confidenceScore,
+        matchReasons
+    };
+}
+
+/**
+ * Check CMS Emergency_Profiles for existing signup payment
+ * @param {string} userId - User's ID
+ * @returns {Promise<object>} - CMS search result
+ */
+async function checkCMSSignupPayment(userId) {
+    try {
+        console.log(`[Enhanced SignupDetector] Checking Emergency_Profiles for userId: ${userId}`);
+        
+        const profileQuery = await wixData.query('Emergency_Profiles')
+            .eq('_owner', userId)
+            .limit(1)
+            .find();
+        
+        if (profileQuery.items.length === 0) {
+            console.log(`[Enhanced SignupDetector] No Emergency_Profiles record found for userId: ${userId}`);
+            return { hasPaidSignup: false };
+        }
+        
+        const profile = profileQuery.items[0];
+        
+        // Check for signup payment indicators using the correct field names
+        const hasSignupPayment = !!(
+            profile.signUpPaid === true ||
+            profile.signUpReference ||
+            (profile.joinedDate && profile.lastPaymentAmount && profile.lastPaymentAmount <= 100)
+        );
+        
+        if (hasSignupPayment) {
+            return {
+                hasPaidSignup: true,
+                paymentReference: profile.signUpReference || `cms_signup_${userId}`,
+                paymentDate: profile.joinedDate || profile.signupDate || profile._createdDate,
+                amount: profile.lastPaymentAmount || 0,
+                source: 'Emergency_Profiles',
+                profile
+            };
+        }
+        
+        console.log(`[Enhanced SignupDetector] No signup payment found in Emergency_Profiles for userId: ${userId}`);
+        return { hasPaidSignup: false };
+        
+    } catch (err) {
+        console.error(`[Enhanced SignupDetector] CMS check failed:`, err);
+        return { hasPaidSignup: false, error: err.message };
+    }
+}
+
+/**
+ * Sync Paystack signup payment to CMS Emergency_Profiles
+ * @param {string} userId - User's ID
+ * @param {object} paymentDetails - Paystack payment details
+ * @returns {Promise<object>} - Sync result
+ */
+export async function syncPaystackSignupToCMS(userId, paymentDetails) {
+    try {
+        console.log(`[Enhanced SignupDetector] Syncing Paystack signup payment to Emergency_Profiles for user ${userId}`);
+
+        // Find profile
+        const profileQuery = await wixData.query('Emergency_Profiles')
+            .eq('_owner', userId)
+            .limit(1)
+            .find();
+
+        if (profileQuery.items.length === 0) {
+            console.error(`[Enhanced SignupDetector] No Emergency_Profiles record found for userId: ${userId}`);
+            return { 
+                success: false, 
+                error: 'No Emergency_Profiles record found',
+                message: 'User profile not found in CMS'
+            };
+        }
+
+        const profile = profileQuery.items[0];
+        
+        // Update with enhanced field mapping
+        const updateData = {
+            _id: profile._id,
+            // Core signup payment fields
+            signUpPaid: true,
+            signUpReference: paymentDetails.paymentReference || paymentDetails.transaction?.reference,
+            joinedDate: paymentDetails.paymentDate || new Date(),
+            
+            // Payment details
+            lastPaymentAmount: paymentDetails.amount || 0,
+            lastPaymentDate: paymentDetails.paymentDate || new Date(),
+            
+            // Paystack customer details
+            paystackCustomerCode: paymentDetails.customerCode || paymentDetails.transaction?.customer?.customer_code,
+            
+            // Metadata
+            lastUpdated: new Date(),
+            paymentSyncDate: new Date()
+        };
+
+        const updatedProfile = await wixData.update('Emergency_Profiles', updateData, { suppressAuth: true });
+        
+        console.log(`[Enhanced SignupDetector] ✅ Successfully synced signup payment to Emergency_Profiles`);
+        
+        return {
+            success: true,
+            profile: updatedProfile,
+            message: 'Signup payment successfully synced to CMS',
+            syncedFields: Object.keys(updateData)
+        };
+
+    } catch (err) {
+        console.error(`[Enhanced SignupDetector] ❌ Sync to Emergency_Profiles failed:`, err);
+        return {
+            success: false,
+            error: err.message,
+            message: 'Failed to sync signup payment to CMS'
+        };
+    }
+}

@@ -1,0 +1,26 @@
+// ✅ backend/getContactInfo.jsw
+// Safe version: no wix-crm-backend permission needed
+
+import wixData from 'wix-data';
+import wixUsers from 'wix-users-backend';
+
+/**
+ * Returns the member's first name (or "Member" if none found)
+ */
+export async function getMemberFirstName() {
+  const user = wixUsers.currentUser;
+  if (!user.loggedIn) return 'Member';
+
+  try {
+    // Look up the Contacts collection instead of CRM service
+    const res = await wixData.query('Emergency_Profiles')
+      .eq('userId', user.id)
+      .find({ suppressAuth: true });
+
+    const contact = res.items[0];
+    return contact?.info?.name?.first || 'Member';
+  } catch (err) {
+    console.error('Error fetching contact info:', err);
+    return 'Member';
+  }
+}

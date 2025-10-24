@@ -1,0 +1,29 @@
+import wixData from 'wix-data';
+
+export async function createOrUpdateEmergencyProfile(email, membershipTier) {
+    const publicViewId = generateId();
+
+    const existing = await wixData.query("Emergency_Profiles")
+        .eq("owner", email)
+        .find();
+
+    if (existing.totalCount > 0) {
+        await wixData.update("Emergency_Profiles", {
+            _id: existing.items[0]._id,
+            membershipTier,
+            publicViewId
+        });
+    } else {
+        await wixData.insert("Emergency_Profiles", {
+            owner: email,
+            membershipTier,
+            publicViewId
+        });
+    }
+
+    return publicViewId;
+}
+
+function generateId() {
+    return Math.random().toString(36).substring(2, 10);
+}

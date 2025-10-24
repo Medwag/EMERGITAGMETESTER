@@ -1,0 +1,89 @@
+// backend/status.jsw
+import wixData from "wix-data";
+import { fetch } from "wix-fetch";
+
+// === Get Payment Status Across Paystack + PayFast ===
+export async function getUserPaymentStatus(userId, email) {
+  try {
+    let status = {
+      hasSignUpPaid: false,
+      signupSource: null,
+      signupDate: null,
+      signupAmount: null,
+      hasSubscription: false, // TRUE only if membership tier is selected AND confirmed as paid
+      hasMembershipTierSelected: false, // TRUE if membership tier is selected (regardless of payment)
+      subscriptionSource: null,
+      membershipTier: null,
+    };
+
+    // --- Check Emergency_Profiles CMS first ---
+    const profileRes = await wixData.query("Emergency_Profiles")
+      .eq("_owner", userId)
+      .limit(1)
+      .find({ suppressAuth: true });
+
+    if (profileRes.items.length > 0) {
+      const profile = profileRes.items[0];
+
+      if (profile.signUpPaid) {
+        status.hasSignUpPaid = true;
+        status.signupSource = profile.payFastPaymentId
+          ? "PayFast"
+          : profile.paystackReference
+          ? "Paystack"
+          : "Unknown";
+        status.signupDate = profile.lastPaymentDate || null;
+        status.signupAmount = 150.0;
+      }
+
+      // Check membership tier selection and payment status
+      if (profile.membershipTier) {
+        status.hasMembershipTierSelected = true;
+        status.membershipTier = profile.membershipTier;
+        
+        if (profile.subscriptionActive === true) {
+          // Membership tier selected AND confirmed as paid
+          status.hasSubscription = true;
+          status.subscriptionSource = "CMS";
+        } else {
+          // Membership tier selected but NOT confirmed/paid
+          status.hasSubscription = false;
+        }
+      }
+    }
+
+    // --- Check PaystackTransactions collection ---
+    const paystack = await wixData.query("PaystackTransactions")
+      .eq("userId", userId)
+      .limit(1)
+      .find({ suppressAuth: true });
+    if (paystack.items.length > 0) {
+      status.hasSignUpPaid = true;
+      status.signupSource = "Paystack";
+      status.signupDate = paystack.items[0].processedAt;
+      status.signupAmount = paystack.items[0].amount || 150.0;
+    }
+
+    // --- Check PayFast_Transactions collection ---
+    const payfast = await wixData.query("PayFast_Transactions")
+      .eq("profileOwner", userId)
+      .limit(1)
+      .find({ suppressAuth: true });
+    if (payfast.items.length > 0) {
+      status.hasSignUpPaid = true;
+      status.signupSource = "PayFast";
+      status.signupDate = payfast.items[0].processedAt;
+      status.signupAmount = payfast.items[0].amount || 150.0;
+    }
+
+    return status;
+  } catch (err) {
+    console.error("❌ getUserPaymentStatus error:", err);
+    return {
+      hasSignUpPaid: false,
+      hasSubscription: false,
+      hasMembershipTierSelected: false,
+      error: err.message,
+    };
+  }
+}

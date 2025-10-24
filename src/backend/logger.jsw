@@ -1,0 +1,19 @@
+import { getSecret } from 'wix-secrets-backend';
+import { fetch } from 'wix-fetch';
+
+export async function sendDiscordLog(message) {
+  try {
+    const webhook = await getSecret("discord_webhook");
+    if (!webhook) throw new Error("Missing Discord webhook URL");
+
+    await fetch(webhook, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: message })
+    });
+
+    console.log("✅ Discord log sent:", message);
+  } catch (err) {
+    console.error("❌ Discord log failed:", err.message);
+  }
+}

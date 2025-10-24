@@ -1,0 +1,30 @@
+import { fetch } from 'wix-fetch';
+import { getSecret } from 'wix-secrets-backend'; // ✅ Correct import
+
+// Call this with fullName and email from your app logic
+export async function triggerPlanSelectionAutomation(fullName, email) {
+  const triggerId = "4925632d-f1ca-49f4-81b8-a0f16e0529fd"; // Your actual automation ID
+
+  const payload = {
+    email_field: email,
+    string_field: fullName
+  };
+
+  const token = await getSecret("wix-api-token"); // ✅ Correct usage
+
+  const response = await fetch(`https://www.wixapis.com/automations/v1/automation-trigger/${triggerId}/trigger`, {
+    method: 'POST',
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${token}`
+    },
+    body: JSON.stringify(payload)
+  });
+
+  if (!response.ok) {
+    console.error("❌ Failed to trigger automation:", await response.text());
+    throw new Error("Automation trigger failed");
+  }
+
+  return await response.json();
+}

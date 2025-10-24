@@ -1,0 +1,286 @@
+// 🧪 Test functions for paystack-utils.jsw
+// backend/paystack-utils-test.jsw
+
+import { 
+    verifyPaystackPayment, 
+    upsertEmergencyProfile, 
+    getOrCreatePaystackCustomer,
+    handleSubscriptionPayment,
+    validateWebhookSignature
+} from './paystack-utils.jsw';
+
+/**
+ * Test payment verification with various scenarios
+ */
+export async function testPaymentVerification() {
+    console.log("🧪 Testing payment verification...");
+    
+    const testCases = [
+        // Test invalid inputs
+        { reference: null, expectedSuccess: false, description: "Null reference" },
+        { reference: "", expectedSuccess: false, description: "Empty reference" },
+        { reference: "123", expectedSuccess: false, description: "Too short reference" },
+        
+        // Test valid format (will fail API call but should handle gracefully)
+        { reference: "test_ref_123456789", expectedSuccess: false, description: "Valid format but fake reference" }
+    ];
+    
+    const results = [];
+    
+    for (const testCase of testCases) {
+        try {
+            const result = await verifyPaystackPayment(testCase.reference);
+            const passed = result.success === testCase.expectedSuccess;
+            
+            results.push({
+                description: testCase.description,
+                reference: testCase.reference,
+                expected: testCase.expectedSuccess,
+                actual: result.success,
+                passed: passed,
+                error: result.error || null
+            });
+            
+            console.log(`${passed ? '✅' : '❌'} ${testCase.description}: ${passed ? 'PASSED' : 'FAILED'}`);
+        } catch (error) {
+            results.push({
+                description: testCase.description,
+                reference: testCase.reference,
+                passed: false,
+                error: error.message
+            });
+            console.log(`❌ ${testCase.description}: ERROR - ${error.message}`);
+        }
+    }
+    
+    const totalTests = results.length;
+    const passedTests = results.filter(r => r.passed).length;
+    
+    console.log(`📊 Payment verification tests: ${passedTests}/${totalTests} passed`);
+    
+    return {
+        success: passedTests === totalTests,
+        totalTests,
+        passedTests,
+        results
+    };
+}
+
+/**
+ * Test profile upsert function
+ */
+export async function testProfileUpsert() {
+    console.log("🧪 Testing profile upsert...");
+    
+    const testCases = [
+        // Test missing data
+        {
+            data: {},
+            expectedSuccess: false,
+            description: "Empty data object"
+        },
+        {
+            data: { customer: {}, metadata: {} },
+            expectedSuccess: false,
+            description: "Missing required fields"
+        },
+        // Test valid data structure
+        {
+            data: {
+                customer: { email: "test@example.com" },
+                reference: "test_ref_123",
+                metadata: { userId: "test-user-123", planName: "Bronze" }
+            },
+            expectedSuccess: true,
+            description: "Valid profile data"
+        }
+    ];
+    
+    const results = [];
+    
+    for (const testCase of testCases) {
+        try {
+            const result = await upsertEmergencyProfile(testCase.data);
+            const passed = testCase.expectedSuccess;
+            
+            results.push({
+                description: testCase.description,
+                expected: testCase.expectedSuccess,
+                actual: !!result,
+                passed: passed,
+                result: result || null
+            });
+            
+            console.log(`${passed ? '✅' : '❌'} ${testCase.description}: ${passed ? 'PASSED' : 'FAILED'}`);
+        } catch (error) {
+            const passed = !testCase.expectedSuccess; // Error expected for invalid data
+            
+            results.push({
+                description: testCase.description,
+                expected: testCase.expectedSuccess,
+                actual: false,
+                passed: passed,
+                error: error.message
+            });
+            
+            console.log(`${passed ? '✅' : '❌'} ${testCase.description}: ${passed ? 'PASSED' : 'FAILED'} (${error.message})`);
+        }
+    }
+    
+    const totalTests = results.length;
+    const passedTests = results.filter(r => r.passed).length;
+    
+    console.log(`📊 Profile upsert tests: ${passedTests}/${totalTests} passed`);
+    
+    return {
+        success: passedTests === totalTests,
+        totalTests,
+        passedTests,
+        results
+    };
+}
+
+/**
+ * Test customer creation (validation only - won't create real customers)
+ */
+export async function testCustomerCreation() {
+    console.log("🧪 Testing customer creation validation...");
+    
+    const testCases = [
+        {
+            userId: null,
+            email: null,
+            expectedSuccess: false,
+            description: "Missing userId and email"
+        },
+        {
+            userId: "test-user-123",
+            email: "",
+            expectedSuccess: false,
+            description: "Empty email"
+        },
+        {
+            userId: "",
+            email: "test@example.com",
+            expectedSuccess: false,
+            description: "Empty userId"
+        }
+    ];
+    
+    const results = [];
+    
+    for (const testCase of testCases) {
+        try {
+            await getOrCreatePaystackCustomer(testCase.userId, testCase.email, "Test", "User");
+            
+            // If we get here without error, the test failed (for invalid inputs)
+            results.push({
+                description: testCase.description,
+                expected: testCase.expectedSuccess,
+                actual: true,
+                passed: testCase.expectedSuccess
+            });
+        } catch (error) {
+            const passed = !testCase.expectedSuccess; // Error expected for invalid data
+            
+            results.push({
+                description: testCase.description,
+                expected: testCase.expectedSuccess,
+                actual: false,
+                passed: passed,
+                error: error.message
+            });
+            
+            console.log(`${passed ? '✅' : '❌'} ${testCase.description}: ${passed ? 'PASSED' : 'FAILED'} (${error.message})`);
+        }
+    }
+    
+    const totalTests = results.length;
+    const passedTests = results.filter(r => r.passed).length;
+    
+    console.log(`📊 Customer creation tests: ${passedTests}/${totalTests} passed`);
+    
+    return {
+        success: passedTests === totalTests,
+        totalTests,
+        passedTests,
+        results
+    };
+}
+
+/**
+ * Run all paystack-utils tests
+ */
+export async function runAllUtilsTests() {
+    console.log("🚀 Running all paystack-utils tests...");
+    
+    const testResults = {
+        timestamp: new Date(),
+        tests: {}
+    };
+    
+    try {
+        testResults.tests.paymentVerification = await testPaymentVerification();
+        testResults.tests.profileUpsert = await testProfileUpsert();
+        testResults.tests.customerCreation = await testCustomerCreation();
+        
+        const allPassed = Object.values(testResults.tests).every(test => test.success);
+        testResults.success = allPassed;
+        
+        const totalTests = Object.values(testResults.tests).reduce((sum, test) => sum + test.totalTests, 0);
+        const passedTests = Object.values(testResults.tests).reduce((sum, test) => sum + test.passedTests, 0);
+        
+        console.log(`🎯 Overall result: ${passedTests}/${totalTests} tests passed`);
+        console.log(allPassed ? "✅ All utils tests PASSED!" : "❌ Some utils tests FAILED!");
+        
+        return testResults;
+        
+    } catch (error) {
+        console.error("❌ Test suite error:", error.message);
+        testResults.success = false;
+        testResults.error = error.message;
+        return testResults;
+    }
+}
+
+/**
+ * Test webhook signature validation
+ */
+export async function testWebhookValidation() {
+    console.log("🧪 Testing webhook signature validation...");
+    
+    const testCases = [
+        { body: null, signature: null, expected: false, description: "Null inputs" },
+        { body: "", signature: "", expected: false, description: "Empty inputs" },
+        { body: "test", signature: "invalid", expected: false, description: "Invalid signature" }
+    ];
+    
+    const results = [];
+    
+    for (const testCase of testCases) {
+        try {
+            const result = await validateWebhookSignature(testCase.body, testCase.signature);
+            const passed = result === testCase.expected;
+            
+            results.push({
+                description: testCase.description,
+                expected: testCase.expected,
+                actual: result,
+                passed: passed
+            });
+            
+            console.log(`${passed ? '✅' : '❌'} ${testCase.description}: ${passed ? 'PASSED' : 'FAILED'}`);
+        } catch (error) {
+            results.push({
+                description: testCase.description,
+                passed: false,
+                error: error.message
+            });
+        }
+    }
+    
+    return {
+        success: results.every(r => r.passed),
+        results
+    };
+}

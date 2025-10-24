@@ -1,0 +1,41 @@
+// ⚠️ LEGACY FILE MIGRATION NOTICE
+// This file (paystack.jsw) contains legacy Paystack integration code
+// 
+// STATUS: NEEDS MIGRATION OR CONSOLIDATION
+// 
+// The functionality in this file has been replaced by:
+// - paystack-api.js (core API functions)
+// - paystack-config.jsw (configuration management)
+// - payments.jsw (payment workflow functions)
+// - paystack-utils.jsw (utility functions)
+//
+// RECOMMENDATION: 
+// 1. Review functions in this file to identify any unique functionality
+// 2. Migrate unique functions to appropriate new files
+// 3. Update any imports that reference this file
+// 4. Consider deprecating this file once migration is complete
+//
+// CURRENT ISSUES:
+// - Uses multiple inconsistent secret key names
+// - Hardcoded API URLs
+// - Duplicates functionality now available in newer files
+//
+// For immediate fixes, replace:
+// - getSecret('Live_Secret_Key') → getPaystackSecretKey() from paystack-config.jsw
+// - getSecret('PaystackSKTest') → getPaystackSecretKey() from paystack-config.jsw
+// - "https://api.paystack.co" → PAYSTACK_CONFIG.API_BASE_URL
+
+import { getPaystackSecretKey, PAYSTACK_CONFIG } from './paystack-config.jsw';
+
+// Export a deprecation warning
+export function LEGACY_WARNING() {
+    console.warn(`
+    ⚠️ WARNING: You are using paystack.jsw which is a legacy file.
+    Please migrate to the new standardized Paystack integration:
+    - Use 'payments.jsw' for payment workflows
+    - Use 'paystack-api.js' for direct API calls  
+    - Use 'paystack-config.jsw' for configuration
+    
+    This file should be reviewed and potentially deprecated.
+    `);
+}

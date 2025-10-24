@@ -1,0 +1,90 @@
+// ✅ backend/payfastNotify.jsw
+// Handles PayFast Instant Payment Notifications (IPN)
+// for EmergiTag — confirms payments in the CMS securely.
+
+import wixData from 'wix-data';
+import crypto from 'crypto';
+import { getPayFastConfig } from 'backend/payfast-config.jsw';
+import { customEncode } from 'backend/payfastUtils.jsw';
+
+// -------------------------------------------------------------
+// 🔒 Verify PayFast signature
+// -------------------------------------------------------------
+function verifySignature(postData, passphrase, receivedSignature) {
+  const sortedKeys = Object.keys(postData)
+    .filter((key) => key !== 'signature')
+    .sort();
+
+  const signatureString = sortedKeys
+    .map((key) => `${key}=${customEncode(postData[key])}`)
+    .join('&');
+
+  const finalString = passphrase
+    ? `${signatureString}&passphrase=${customEncode(passphrase)}`
+    : signatureString;
+
+  const expectedSignature = crypto
+    .createHash('md5')
+    .update(finalString)
+    .digest('hex');
+
+  return expectedSignature === receivedSignature;
+}
+
+// -------------------------------------------------------------
+// 🧾 Store / Update Payment Info
+// -------------------------------------------------------------
+async function savePaymentStatus(data) {
+  try {
+    const record = {
+      userId: data.custom_str1 || '',
+      gateway: 'payfast',
+      transactionId: data.pf_payment_id || '',
+      status: data.payment_status || 'unknown',
+      amount: data.amount_gross || data.amount || '',
+      email: data.email_address || '',
+      m_payment_id: data.m_payment_id || '',
+      createdAt: new Date(),
+    };
+
+    await wixData.insert('Payfast_Transactions', record, { suppressAuth: true });
+    console.log('🧾 [PayFastNotify] Payment logged successfully.');
+  } catch (err) {
+    console.error('💥 [PayFastNotify] Failed to log payment:', err.message);
+  }
+}
+
+// -------------------------------------------------------------
+// 🚀 Main Entry Point (Wix HTTP Function)
+// -------------------------------------------------------------
+// This is automatically exposed as a webhook at:
+// https://www.emergitag.me/_functions/payfastNotify
+export async function post_payfastWebhook(request) {
+
+  try {
+    const config = await getPayFastConfig();
+    const { passphrase } = config.getCredentials();
+
+    const bodyText = await request.body.text();
+    const params = new URLSearchParams(bodyText);
+    const data = Object.fromEntries(params.entries());
+
+    console.log('📩 [PayFast IPN Received]', data);
+
+    // Verify signature
+    const valid = verifySignature(data, passphrase, data.signature);
+    if (!valid) {
+      console.warn('⚠️ Invalid PayFast signature — rejecting request.');
+      return new Response('Invalid signature', { status: 400 });
+    }
+
+    // Log transaction
+    await savePaymentStatus(data);
+
+    // ✅ Respond to PayFast that we received the IPN
+    return new Response('OK', { status: 200 });
+  } catch (err) {
+    console.error('💥 [PayFastNotify] Error:', err.message);
+    return new Response('Error', { status: 500 });
+  }
+}

@@ -1,0 +1,52 @@
+import { getPaystackSecretKey, PAYSTACK_CONFIG } from './paystack-config.jsw';
+import wixData from 'wix-data'; // ✅ Required to write to CMS
+import { fetch } from 'wix-fetch';
+
+export async function verifyTransaction(reference) {
+  if (!reference) {
+    return { success: false, message: "No reference provided." };
+  }
+
+  try {
+    const secretKey = await getPaystackSecretKey();
+    const url = `${PAYSTACK_CONFIG.API_BASE_URL}/transaction/verify/${reference}`;
+
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${secretKey}`,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    /** @type {{ status: boolean; message?: string; data?: { status: string; metadata?: any; [key: string]: any } }} */
+    const data = /** @type {any} */ (await response.json());
+
+    if (data.status && data.data?.status === 'success') {
+      const userId = data.data?.metadata?.userId;
+      const membershipTier = data.data?.metadata?.membershipTier || "None";
+
+      if (userId) {
+        const profileData = {
+          _id: userId, // So each user only has one profile
+          userId,
+          membershipTier,
+          publicViewId: userId,
+        };
+
+        try {
+          await wixData.save("Emergency_Profiles", profileData);
+        } catch (cmsError) {
+          console.error("Failed to save to Emergency_Profiles:", cmsError);
+        }
+      }
+
+      return { success: true, data: data.data };
+    } else {
+      return { success: false, message: data.message || "Payment not successful." };
+    }
+  } catch (error) {
+    console.error("verifyTransaction failed:", error);
+    return { success: false, message: "Error verifying payment." };
+  }
+}

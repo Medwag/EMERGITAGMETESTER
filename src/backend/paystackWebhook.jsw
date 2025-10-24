@@ -1,0 +1,157 @@
+// backend/paystackWebhook.jsw
+import wixData from 'wix-data';
+import wixSecretsBackend from 'wix-secrets-backend';
+import { sendEmail, sendWhatsAppAlert, sendDiscordAlert } from 'backend/notify.jsw';
+import { createHmac } from 'crypto';
+import { triggeredEmails } from 'wix-crm-frontend';
+
+// Email template IDs
+const EMAIL_PAYMENT_SUCCESS = "UrDYTwt";
+const EMAIL_SUBSCRIPTION_CONF = "UrJWQIe";
+const EMAIL_WELCOME = "UsUBlWl";
+
+// --- Helpers ---
+function maskString(str, start = 2, end = 2) {
+  if (!str) return "";
+  if (str.length <= start + end) return "*".repeat(str.length);
+  return str.slice(0, start) + "*".repeat(str.length - start - end) + str.slice(-end);
+}
+
+function maskProfile(p) {
+  return {
+    name: maskString(p.fullName, 2, 2),
+    email: maskString(p.emailAddress, 3, 4),
+    phone: maskString(p.phone, 4, 2),
+    address: p.deliveryAddress ? p.deliveryAddress.replace(/(\d|\w)/g, "*") : "****"
+  };
+}
+
+// --- Paystack HTTP webhook ---
+export async function post_paystackWebhook(request) {
+  try {
+    const rawBody = await request.body.text();
+    const secret = await wixSecretsBackend.getSecret("paystack");
+
+    // Verify signature
+    const signature =
+      request.headers["x-paystack-signature"] ||
+      request.headers["X-Paystack-Signature"];
+    const expected = createHmac("sha512", secret).update(rawBody).digest("hex");
+    if (expected !== signature) {
+      console.warn("⚠️ Invalid Paystack signature");
+      return { status: 401, body: { error: "Invalid signature" } };
+    }
+
+    const evt = JSON.parse(rawBody);
+    const type = evt.event;
+    const data = evt.data || {};
+    const md = data.metadata || {};
+    const userId = md.userId;
+    const membershipTier = md.membershipTier || "Bronze";
+
+    if (!userId) {
+      console.error("❌ Webhook missing metadata.userId");
+      return { status: 400, body: { error: "Missing userId" } };
+    }
+
+    // Load or create user profile
+    let q = await wixData.query("Emergency_Profiles")
+      .eq("userId", userId)
+      .limit(1)
+      .find({ suppressAuth: true });
+
+    let profile;
+    if (!q.items.length) {
+      console.warn(`ℹ️ No profile found for userId ${userId}, creating new profile...`);
+      profile = {
+        userId,
+        membershipTier,
+        fullName: md.fullName || "New User",
+        emailAddress: md.email || "",
+        phone: md.phone || "",
+        deliveryAddress: md.address || "",
+        paymentEmailSent: false,
+        subscriptionEmailSent: false,
+        welcomeEmailSent: false,
+        signUpPaid: false,
+        signUpReference: "",
+        subscriptionId: ""
+      };
+      const insertRes = await wixData.insert("Emergency_Profiles", profile, { suppressAuth: true });
+      profile = insertRes; // Now profile includes _id
+    } else {
+      profile = q.items[0];
+      profile.paymentEmailSent = !!profile.paymentEmailSent;
+      profile.subscriptionEmailSent = !!profile.subscriptionEmailSent;
+      profile.welcomeEmailSent = !!profile.welcomeEmailSent;
+
+      // --- Sync missing metadata ---
+      let needsUpdate = false;
+      if (!profile.fullName && md.fullName) { profile.fullName = md.fullName; needsUpdate = true; }
+      if (!profile.emailAddress && md.email) { profile.emailAddress = md.email; needsUpdate = true; }
+      if (!profile.phone && md.phone) { profile.phone = md.phone; needsUpdate = true; }
+      if (!profile.deliveryAddress && md.address) { profile.deliveryAddress = md.address; needsUpdate = true; }
+
+      if (needsUpdate) {
+        await wixData.update("Emergency_Profiles", profile, { suppressAuth: true });
+        console.log(`ℹ️ Profile synced with Paystack metadata for userId ${userId}`);
+        await sendDiscordAlert(`ℹ️ Profile auto-synced with Paystack metadata\nUser: ${userId}\nUpdated Fields: ${Object.keys(md).join(", ")}`);
+      }
+    }
+
+    // Update profile based on event
+    if (type === "charge.success") {
+      profile.signUpPaid = true;
+      profile.signUpReference = data.reference || profile.signUpReference;
+    }
+    if (type === "subscription.create") {
+      profile.membershipTier = membershipTier;
+      profile.subscriptionId = data.subscription_code || profile.subscriptionId;
+    }
+
+    // Save profile updates
+    await wixData.update("Emergency_Profiles", profile, { suppressAuth: true });
+
+    // --- Notifications ---
+    if (type === "charge.success" && !profile.paymentEmailSent) {
+      if (profile.emailAddress && profile.fullName) {
+        await sendEmail(EMAIL_PAYMENT_SUCCESS, userId, { fullName: profile.fullName });
+        await wixData.update("Emergency_Profiles", { _id: profile._id, paymentEmailSent: true }, { suppressAuth: true });
+      }
+    }
+
+    if (type === "subscription.create") {
+      if (profile.waConsent && profile.phone) {
+        await sendWhatsAppAlert(profile.phone, `✅ Subscription Successful for ${profile.fullName} (${membershipTier})`);
+      }
+
+      if (!profile.subscriptionEmailSent && profile.emailAddress && profile.fullName) {
+        triggeredEmails.emailMember(EMAIL_SUBSCRIPTION_CONF, userId);
+        await sendEmail(EMAIL_SUBSCRIPTION_CONF, userId, { fullName: profile.fullName, membershipTier });
+        await wixData.update("Emergency_Profiles", { _id: profile._id, subscriptionEmailSent: true }, { suppressAuth: true });
+      }
+
+      if (!profile.welcomeEmailSent && profile.emailAddress && profile.fullName) {
+        const masked = maskProfile(profile);
+        await sendEmail(EMAIL_WELCOME, userId, {
+          fullName: profile.fullName,
+          maskedName: masked.name,
+          maskedPhone: masked.phone,
+          maskedEmail: masked.email,
+          maskedAddress: masked.address
+        });
+        await wixData.update("Emergency_Profiles", { _id: profile._id, welcomeEmailSent: true }, { suppressAuth: true });
+      }
+    }
+
+    // Admin Discord log
+    await sendDiscordAlert(`✅ Paystack webhook processed\nType: ${type}\nUser: ${userId}\nTier: ${membershipTier}`);
+
+    return { status: 200, body: { ok: true } };
+
+  } catch (err) {
+    console.error("❌ Webhook error:", err);
+    await sendDiscordAlert(`❌ Webhook error: ${err.message}`);
+    return { status: 500, body: { error: err.message } };
+  }
+}

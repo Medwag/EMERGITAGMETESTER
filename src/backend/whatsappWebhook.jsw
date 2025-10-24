@@ -1,0 +1,53 @@
+// backend/whatsappWebhook.jsw
+
+// GET request: verification from Meta
+export function get_webhook(request) {
+    try {
+        const params = request.query; // hub.mode, hub.verify_token, hub.challenge
+
+        console.log("GET webhook called with params:", params);
+
+        if (params['hub.mode'] === 'subscribe' && params['hub.verify_token'] === 'emergitag2025') {
+            console.log("Webhook verified successfully!");
+            // Respond with challenge as plain text (Meta requires this)
+            return {
+                status: 200,
+                body: params['hub.challenge'], 
+                headers: { "Content-Type": "text/plain" } 
+            };
+        } else {
+            console.error("Webhook verification failed. Invalid token or mode.");
+            return {
+                status: 403,
+                body: "Verification failed"
+            };
+        }
+    } catch (err) {
+        console.error("Error in get_webhook:", err);
+        return {
+            status: 500,
+            body: "Internal Server Error"
+        };
+    }
+}
+
+// POST request: receives WhatsApp messages or events
+export async function post_webhook(request) {
+    try {
+        const body = await request.body.json();
+        console.log("POST webhook received:", body);
+
+        // Process message / event here
+
+        return {
+            status: 200,
+            body: {} // Meta expects an object
+        };
+    } catch (err) {
+        console.error("POST webhook error:", err);
+        return {
+            status: 400,
+            body: { error: err.message }
+        };
+    }
+}

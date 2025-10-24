@@ -1,0 +1,267 @@
+// backend/profileViewed.jsw
+import wixData from 'wix-data';
+import { getSecret } from 'wix-secrets-backend';
+import { fetch } from 'wix-fetch';
+import { sendEmailAlert } from 'backend/notify-email.jsw'; // adjust path if your module name differs
+
+// CONFIG — change defaultCountryCode if you want to auto-prefix missing country codes.
+// Best practice: save default country code in Secrets and read it — but we keep a fallback here.
+const DEFAULT_COUNTRY_CODE = "+27"; // South Africa as default (change if needed)
+const WHATSAPP_API_VERSION = "v19.0"; // keep consistent with other code
+
+// Helpers ---------------------------------------------------------
+
+/**
+ * Keep only digits. If no leading + / country code, optionally prefix default.
+ * Returns E.164-ish digits-only string (no plus). e.g. +27761234567 -> 27761234567
+ */
+function normalizePhoneDigits(raw, defaultCountryCode = DEFAULT_COUNTRY_CODE) {
+  if (!raw) return null;
+  // Remove non-digit and non-plus characters
+  let s = String(raw).trim();
+
+  // If starts with + keep +
+// but we'll remove + for the API recipient field (we send digits only)
+  s = s.replace(/[^+\d]/g, "");
+
+  // If it starts with '+' then strip it for Meta API which expects digits-only
+  if (s.startsWith("+")) return s.slice(1);
+
+  // If it already looks like it contains an international code (longer than 9 digits), assume ok
+  const digits = s.replace(/\D/g, "");
+  if (digits.length >= 10) return digits;
+
+  // Otherwise prefix default country code (strip +)
+  const def = (defaultCountryCode || DEFAULT_COUNTRY_CODE).replace(/\D/g, "");
+  return def + digits;
+}
+
+/**
+ * Build components array for template body parameters (WhatsApp Cloud API).
+ * Each parameter object must be { type: "text", text: "..." }
+ */
+function buildTemplateComponents(params = []) {
+  return [
+    {
+      type: "body",
+      parameters: params.map(p => ({ type: "text", text: String(p ?? "") }))
+    }
+  ];
+}
+
+/**
+ * Insert an audit record to NotificationsLog collection (create collection in CMS with appropriate fields).
+ */
+async function logNotificationAttempt(log) {
+  try {
+    const entry = {
+      createdAt: new Date(),
+      ...log
+    };
+    // Use suppressAuth so webhook/back-end can insert even if running as site
+    await wixData.insert("NotificationsLog", entry, { suppressAuth: true });
+  } catch (err) {
+    // don't throw — logging failure should not break the flow
+    console.error("❌ Failed to write NotificationsLog:", err);
+  }
+}
+
+/**
+ * Send a WhatsApp template message via Meta Graph API.
+ * Retries with exponential backoff on failures.
+ *
+ * @param {string} phoneDigitsOnly - digits-only phone string (no +)
+ * @param {string} templateName - name of the template in Meta (e.g. emergitag_profile_view_notification)
+ * @param {Array<string>} templateVars - ordered array of text variables used in the template body
+ * @param {number} maxRetries
+ */
+async function sendWhatsAppTemplateWithRetry(phoneDigitsOnly, templateName, templateVars = [], maxRetries = 4) {
+  const token = await getSecret("whatsappToken");
+  const phoneId = await getSecret("whatsappPhoneId");
+  if (!token || !phoneId) throw new Error("WhatsApp token or phoneId missing in Secrets Manager.");
+
+  const url = `https://graph.facebook.com/${WHATSAPP_API_VERSION}/${phoneId}/messages`;
+  const components = buildTemplateComponents(templateVars);
+
+  let attempt = 0;
+  let lastError = null;
+
+  while (attempt <= maxRetries) {
+    try {
+      const body = {
+        messaging_product: "whatsapp",
+        to: phoneDigitsOnly,
+        type: "template",
+        template: {
+          name: templateName,
+          language: { code: "en" },
+          components
+        }
+      };
+
+      const res = await fetch(url, {
+        method: "post",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(body)
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        // API returned non-2xx
+        lastError = { status: res.status, body: data };
+        // If 4xx error likely won't be fixed by retries except rate-limit; decide to retry on 429
+        if (res.status === 429 && attempt < maxRetries) {
+          const delay = Math.pow(2, attempt) * 500;
+          await new Promise(r => setTimeout(r, delay));
+          attempt++;
+          continue;
+        }
+        // Not retryable in many 4xx cases — throw
+        throw new Error(`WhatsApp API error: ${JSON.stringify(data)}`);
+      }
+
+      // success — log and return
+      await logNotificationAttempt({
+        channel: "whatsapp",
+        to: phoneDigitsOnly,
+        template: templateName,
+        templateVars,
+        result: "success",
+        response: JSON.stringify(data)
+      });
+
+      return { success: true, response: data };
+    } catch (err) {
+      lastError = err;
+      // log attempt
+      await logNotificationAttempt({
+        channel: "whatsapp",
+        to: phoneDigitsOnly,
+        template: templateName,
+        templateVars,
+        result: "error",
+        errorMessage: err?.message || String(err)
+      });
+
+      // Exponential backoff retry for transient failures
+      if (attempt < maxRetries) {
+        const delay = Math.pow(2, attempt) * 500; // 500ms, 1000ms, 2000ms...
+        await new Promise(r => setTimeout(r, delay));
+        attempt++;
+        continue;
+      } else {
+        break;
+      }
+    }
+  }
+
+  // After retries, throw the last error so caller can do fallback
+  throw lastError;
+}
+
+// Public API ---------------------------------------------------------
+
+/**
+ * profileViewed
+ * Send profile-view notification per the rules.
+ *
+ * @param {string} profileId - Emergency_Profiles _id
+ * @param {string} viewerIp - IP of the viewer
+ * @param {string} viewerLocation - Human readable location of the viewer
+ * @param {object} [opts] - optional config: { templateName, defaultCountryCode }
+ */
+export async function profileViewed(profileId, viewerIp = "Unknown IP", viewerLocation = "Unknown location", opts = {}) {
+  const results = {
+    profileId,
+    attemptedRecipients: [],
+    emailFallback: null,
+    errors: []
+  };
+
+  try {
+    if (!profileId) throw new Error("profileId is required");
+
+    // load profile using suppressAuth to allow webhook/back-end usage
+    const profile = await wixData.get("Emergency_Profiles", profileId);
+    if (!profile) {
+      results.errors.push("Profile not found");
+      return results;
+    }
+
+    // permission check: waConsent must be true
+    if (!profile.receiveNotifications) {
+      results.errors.push("receiveNotifications not true — skipping WhatsApp notifications");
+      return results;
+    }
+
+    // gather numbers: primary always, additional only if receiveNotifications true
+    const primary = profile.whatsappPhoneInputPrimary || null;
+    const additional = profile.whatsappPhoneInputAdditional || null;
+    const allowAdditional = profile.receiveNotifications === true;
+
+    // fallback to general phone if neither primary nor additional present
+    let fallback = null;
+    if (profile.waConsent === true) {
+    fallback = profile.whatsAppNumber || profile.phone || null;
+}
+
+
+    const targetsRaw = [];
+    if (primary) targetsRaw.push(primary);
+    if (allowAdditional && additional) targetsRaw.push(additional);
+    if (targetsRaw.length === 0 && fallback) targetsRaw.push(fallback);
+
+    if (targetsRaw.length === 0) {
+      results.errors.push("No phone numbers available to notify");
+      return results;
+    }
+
+    // template name (use provided or default)
+    const templateName = opts.templateName || "emergitag_profile_view_notification";
+
+    // build variables (order-sensitive)
+    const fullName = profile.fullName || "Client";
+    const publicViewId = profile.publicViewId || "";
+    const templateVars = [fullName, publicViewId, viewerLocation, viewerIp];
+
+    // send to each target (normalized digits-only)
+    for (const raw of targetsRaw) {
+      try {
+        const digits = normalizePhoneDigits(raw, opts.defaultCountryCode || DEFAULT_COUNTRY_CODE);
+        if (!digits) {
+          results.attemptedRecipients.push({ raw, digits: null, status: "skipped", reason: "normalize failed" });
+          continue;
+        }
+
+        // send and await result (with retries inside)
+        const resp = await sendWhatsAppTemplateWithRetry(digits, templateName, templateVars, 3);
+        results.attemptedRecipients.push({ raw, digits, status: "sent", responseSummary: resp?.response || null });
+      } catch (err) {
+        results.attemptedRecipients.push({ raw, digits: normalizePhoneDigits(raw, opts.defaultCountryCode || DEFAULT_COUNTRY_CODE), status: "failed", error: err?.message || String(err) });
+        results.errors.push(`Failed to send to ${raw}: ${err?.message || String(err)}`);
+      }
+    }
+
+    // Email fallback: if any WhatsApp failed or you still want email notification
+    if (profile.emailAddress) {
+      try {
+        const emailBody = `Hi ${fullName},\n\nYour EmergiTag profile (${publicViewId}) was viewed.\nLocation: ${viewerLocation}\nIP: ${viewerIp}\n\nIf you didn't expect this, contact support.`;
+        // sendEmailAlert(toAddress, subject, body) — adjust signature if your module expects different params
+        await sendEmailAlert(profile.emailAddress, `Your EmergiTag profile was viewed`, emailBody);
+        results.emailFallback = { to: profile.emailAddress, status: "sent" };
+      } catch (err) {
+        results.emailFallback = { to: profile.emailAddress, status: "failed", error: err?.message || String(err) };
+        results.errors.push(`Email fallback failed: ${err?.message || String(err)}`);
+      }
+    }
+
+    return results;
+  } catch (err) {
+    console.error("❌ profileViewed error:", err);
+    results.errors.push(err?.message || String(err));
+    return results;
+  }
+}

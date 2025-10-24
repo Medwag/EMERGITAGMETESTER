@@ -1,0 +1,489 @@
+// ✅ backend/payfast-signup-detector.jsw
+// PayFast Signup Payment Detection for EmergiTag
+// Searches for PayFast signup payments using multiple strategies
+
+import wixData from 'wix-data';
+
+/**
+ * Search for PayFast signup payments for a specific user
+ * @param {string} userId - User ID to search for
+ * @param {object} options - Search options
+ * @returns {Promise<object>} PayFast payment search results
+ */
+export async function searchPayFastSignupPayments(userId, options = {}) {
+    const startTime = Date.now();
+    console.log(`🔍 [PayFast Detector] Starting PayFast signup payment search for user: ${userId}`);
+
+    const searchOptions = {
+        timeWindow: 30, // days
+        includePartialMatches: true,
+        returnTopCandidates: 3,
+        ...options
+    };
+
+    try {
+        // Step 1: Search in CMS payment records (if they exist)
+        const cmsResults = await searchPayFastInCMS(userId, searchOptions);
+        
+        // Step 2: Search using reference patterns
+        const referenceResults = await searchByPayFastReference(userId, searchOptions);
+        
+        // Step 3: Combine and analyze results
+        const allResults = [...cmsResults, ...referenceResults];
+        
+        if (allResults.length === 0) {
+            console.log(`❌ [PayFast Detector] No PayFast signup payments found for user: ${userId}`);
+            return {
+                success: true,
+                paymentDetected: false,
+                confidence: 0,
+                totalFound: 0,
+                searchTime: Date.now() - startTime,
+                searchStrategies: ['cms_records', 'reference_patterns']
+            };
+        }
+
+        // Step 4: Analyze results and determine best match
+        const analysisResult = analyzePayFastResults(allResults, userId);
+        
+        console.log(`✅ [PayFast Detector] Search completed in ${Date.now() - startTime}ms`);
+        console.log(`[PayFast Detector] Found ${allResults.length} potential matches, confidence: ${analysisResult.confidence}%`);
+
+        return {
+            success: true,
+            paymentDetected: analysisResult.confidence > 50,
+            confidence: analysisResult.confidence,
+            paymentReference: analysisResult.bestMatch?.reference,
+            amount: analysisResult.bestMatch?.amount,
+            paymentDate: analysisResult.bestMatch?.date,
+            bestMatch: analysisResult.bestMatch,
+            allMatches: allResults,
+            totalFound: allResults.length,
+            searchTime: Date.now() - startTime,
+            details: analysisResult.details
+        };
+
+    } catch (error) {
+        console.error(`❌ [PayFast Detector] Search failed:`, error);
+        return {
+            success: false,
+            error: error.message,
+            paymentDetected: false,
+            confidence: 0,
+            searchTime: Date.now() - startTime
+        };
+    }
+}
+
+/**
+ * Search for PayFast payments in CMS collections
+ * @param {string} userId - User ID
+ * @param {object} options - Search options
+ * @returns {Promise<Array>} CMS search results
+ */
+async function searchPayFastInCMS(userId, options) {
+    console.log(`🗃️ [PayFast Detector] Searching CMS for PayFast records: ${userId}`);
+    
+    try {
+        const results = [];
+        const timeWindow = new Date(Date.now() - (options.timeWindow * 24 * 60 * 60 * 1000));
+
+        // Check Emergency_Profiles for existing PayFast payment records
+        const profileQuery = await wixData.query('Emergency_Profiles')
+            .eq('userId', userId)
+            .eq('paymentProvider', 'payfast')
+            .find();
+
+        profileQuery.items.forEach(profile => {
+            if (profile.signUpReference && profile.signUpPaid) {
+                results.push({
+                    source: 'emergency_profiles',
+                    reference: profile.signUpReference,
+                    amount: profile.paymentAmount || 149.00,
+                    date: profile.joinedDate || new Date(),
+                    userId: profile.userId,
+                    confidence: 95, // High confidence for CMS records
+                    details: {
+                        profileId: profile._id,
+                        provider: 'payfast',
+                        verified: true
+                    }
+                });
+            }
+        });
+
+        // Check for any PayFast transaction logs (if collection exists)
+        try {
+            console.log('[PayFast Detector] Attempting to query PayFast_Transactions collection...');
+            const transactionQuery = await wixData.query('PayFast_Transactions')
+                .eq('custom_str1', userId)
+                .eq('payment_status', 'COMPLETE')
+                .ge('_createdDate', timeWindow)
+                .find();
+
+            console.log('[PayFast Detector] PayFast_Transactions query successful');
+            transactionQuery.items.forEach(transaction => {
+                results.push({
+                    source: 'payfast_transactions',
+                    reference: transaction.m_payment_id,
+                    amount: parseFloat(transaction.amount_gross || 149.00),
+                    date: transaction._createdDate,
+                    userId: transaction.custom_str1,
+                    confidence: 90,
+                    details: {
+                        transactionId: transaction._id,
+                        paymentStatus: transaction.payment_status,
+                        paymentMethod: transaction.payment_method || 'unknown'
+                    }
+                });
+            });
+
+        } catch (collectionError) {
+            // ULTRA-COMPREHENSIVE PayFast_Transactions collection error handling
+            console.log('[PayFast Detector] PayFast_Transactions query failed - analyzing error...');
+            
+            // Log error details for analysis
+            console.log('[PayFast Detector] Error object:', {
+                message: collectionError?.message,
+                errorCode: collectionError?.errorCode,
+                jsonContent: collectionError?.jsonContent,
+                broadCode: collectionError?.broadCode,
+                name: collectionError?.name,
+                type: typeof collectionError
+            });
+            
+            // Multiple detection patterns for collection not found errors
+            const isCollectionNotFoundError = (
+                // Direct error code matches
+                collectionError?.errorCode === 'WDE0025' ||
+                collectionError?.broadCode === 'WD_SCHEMA_DOES_NOT_EXIST' ||
+                
+                // Message pattern matches
+                collectionError?.message?.includes('PayFast_Transactions') || 
+                collectionError?.message?.includes('collection does not exist') ||
+                collectionError?.message?.includes('SCHEMA_DOES_NOT_EXIST') ||
+                collectionError?.message?.toLowerCase().includes('does not exist') ||
+                
+                // JSON content matches
+                (collectionError?.jsonContent && collectionError.jsonContent.collection === 'PayFast_Transactions') ||
+                (collectionError?.jsonContent && collectionError.jsonContent.errorCode === 'WDE0025') ||
+                (collectionError?.jsonContent && collectionError.jsonContent.broadCode === 'WD_SCHEMA_DOES_NOT_EXIST') ||
+                
+                // String representation matches (fallback)
+                String(collectionError).includes('PayFast_Transactions') ||
+                String(collectionError).includes('WDE0025')
+            );
+            
+            if (isCollectionNotFoundError) {
+                console.log(`[PayFast Detector] ✅ EXPECTED: PayFast_Transactions collection does not exist - PayFast gateway not configured for this site`);
+            } else {
+                console.warn(`[PayFast Detector] ⚠️ UNEXPECTED: PayFast_Transactions collection access error:`, collectionError);
+            }
+        }
+
+        console.log(`📋 [PayFast Detector] CMS search found ${results.length} records`);
+        return results;
+
+    } catch (error) {
+        console.error(`❌ [PayFast Detector] CMS search error:`, error);
+        return [];
+    }
+}
+
+/**
+ * Search by PayFast reference patterns
+ * @param {string} userId - User ID
+ * @param {object} options - Search options
+ * @returns {Promise<Array>} Reference pattern results
+ */
+async function searchByPayFastReference(userId, options) {
+    console.log(`🔍 [PayFast Detector] Searching by reference patterns for: ${userId}`);
+    
+    try {
+        const results = [];
+        
+        // Generate expected PayFast reference patterns
+        const referencePatterns = generatePayFastReferencePatterns(userId);
+        
+        console.log(`[PayFast Detector] Generated ${referencePatterns.length} reference patterns to search`);
+
+        // Search Emergency_Profiles for these reference patterns
+        for (const pattern of referencePatterns) {
+            try {
+                const query = await wixData.query('Emergency_Profiles')
+                    .contains('signUpReference', pattern)
+                    .find();
+
+                query.items.forEach(profile => {
+                    if (profile.userId === userId || profile.signUpReference.includes(userId)) {
+                        results.push({
+                            source: 'reference_pattern',
+                            reference: profile.signUpReference,
+                            amount: profile.paymentAmount || 149.00,
+                            date: profile.joinedDate || profile._createdDate,
+                            userId: profile.userId,
+                            confidence: calculateReferenceConfidence(pattern, profile.signUpReference, userId),
+                            details: {
+                                matchedPattern: pattern,
+                                profileId: profile._id,
+                                searchMethod: 'reference_contains'
+                            }
+                        });
+                    }
+                });
+
+            } catch (patternError) {
+                console.warn(`⚠️ [PayFast Detector] Error searching pattern ${pattern}:`, patternError);
+            }
+        }
+
+        console.log(`🎯 [PayFast Detector] Reference pattern search found ${results.length} matches`);
+        return results;
+
+    } catch (error) {
+        console.error(`❌ [PayFast Detector] Reference pattern search error:`, error);
+        return [];
+    }
+}
+
+/**
+ * Generate PayFast reference patterns for a user
+ * @param {string} userId - User ID
+ * @returns {Array} Array of reference patterns
+ */
+function generatePayFastReferencePatterns(userId) {
+    const patterns = [
+        `EMERGI_PF_SIGNUP_${userId}`,
+        `PAYFAST_SIGNUP_${userId}`,
+        `PF_SIGNUP_${userId}`,
+        `SIGNUP_${userId}`,
+        userId, // Direct user ID match
+        `emergi-pf-${userId}`,
+        `emergi_payfast_${userId}`
+    ];
+
+    // Add timestamp-based patterns (last 30 days)
+    const now = Date.now();
+    for (let i = 0; i < 30; i++) {
+        const timestamp = now - (i * 24 * 60 * 60 * 1000);
+        patterns.push(`EMERGI_PF_SIGNUP_${userId}_${timestamp}`);
+        
+        // Also try with date format
+        const date = new Date(timestamp);
+        const dateStr = date.getFullYear().toString() + 
+                       (date.getMonth() + 1).toString().padStart(2, '0') + 
+                       date.getDate().toString().padStart(2, '0');
+        patterns.push(`EMERGI_PF_SIGNUP_${userId}_${dateStr}`);
+    }
+
+    return patterns;
+}
+
+/**
+ * Calculate confidence score for reference pattern match
+ * @param {string} pattern - Search pattern used
+ * @param {string} reference - Found reference
+ * @param {string} userId - User ID
+ * @returns {number} Confidence score (0-100)
+ */
+function calculateReferenceConfidence(pattern, reference, userId) {
+    let confidence = 50; // Base confidence
+
+    // Exact pattern match
+    if (reference === pattern) {
+        confidence += 40;
+    }
+
+    // Contains user ID
+    if (reference.includes(userId)) {
+        confidence += 20;
+    }
+
+    // Contains PayFast identifiers
+    if (reference.toLowerCase().includes('payfast') || reference.includes('PF_')) {
+        confidence += 15;
+    }
+
+    // Contains signup identifiers
+    if (reference.toLowerCase().includes('signup')) {
+        confidence += 10;
+    }
+
+    // Contains EmergiTag identifiers
+    if (reference.toLowerCase().includes('emergi')) {
+        confidence += 10;
+    }
+
+    // Recent timestamp (higher confidence for recent references)
+    const now = Date.now();
+    const thirtyDaysAgo = now - (30 * 24 * 60 * 60 * 1000);
+    const timestampMatch = reference.match(/(\d{13})/); // 13-digit timestamp
+    if (timestampMatch) {
+        const timestamp = parseInt(timestampMatch[1]);
+        if (timestamp > thirtyDaysAgo) {
+            confidence += 5;
+        }
+    }
+
+    return Math.min(confidence, 100);
+}
+
+/**
+ * Analyze PayFast results to determine best match
+ * @param {Array} results - All found results
+ * @param {string} userId - User ID
+ * @returns {object} Analysis result
+ */
+function analyzePayFastResults(results, userId) {
+    console.log(`📊 [PayFast Detector] Analyzing ${results.length} PayFast results`);
+
+    if (results.length === 0) {
+        return {
+            confidence: 0,
+            bestMatch: null,
+            details: { reason: 'No results found' }
+        };
+    }
+
+    // Sort by confidence score
+    const sortedResults = results.sort((a, b) => b.confidence - a.confidence);
+    const bestMatch = sortedResults[0];
+
+    let finalConfidence = bestMatch.confidence;
+    const details = {
+        totalResults: results.length,
+        highConfidenceResults: results.filter(r => r.confidence >= 80).length,
+        sources: [...new Set(results.map(r => r.source))],
+        bestMatchSource: bestMatch.source
+    };
+
+    // Adjust confidence based on multiple results
+    if (results.length > 1) {
+        const avgConfidence = results.reduce((sum, r) => sum + r.confidence, 0) / results.length;
+        if (avgConfidence > 70) {
+            finalConfidence = Math.min(finalConfidence + 10, 100); // Boost for multiple good matches
+        }
+    }
+
+    // Check for amount consistency
+    const amounts = results.map(r => parseFloat(r.amount || 0));
+    const uniqueAmounts = [...new Set(amounts)];
+    if (uniqueAmounts.length === 1 && (amounts[0] === 149.00 || amounts[0] === 5.00)) {
+        finalConfidence = Math.min(finalConfidence + 5, 100); // Boost for expected amount (current or legacy)
+        details.amountConsistency = true;
+    }
+
+    console.log(`[PayFast Detector] Analysis complete - Best match confidence: ${finalConfidence}%`);
+
+    return {
+        confidence: finalConfidence,
+        bestMatch: {
+            ...bestMatch,
+            finalConfidence
+        },
+        details
+    };
+}
+
+/**
+ * Validate PayFast signup payment
+ * @param {string} paymentReference - PayFast payment reference
+ * @returns {Promise<object>} Validation result
+ */
+export async function validatePayFastSignupPayment(paymentReference) {
+    try {
+        console.log(`🔍 [PayFast Validator] Validating PayFast payment: ${paymentReference}`);
+
+        // Check in Emergency_Profiles
+        const profileQuery = await wixData.query('Emergency_Profiles')
+            .eq('signUpReference', paymentReference)
+            .find();
+
+        if (profileQuery.items.length > 0) {
+            const profile = profileQuery.items[0];
+            return {
+                isValid: true,
+                userId: profile.userId,
+                amount: profile.paymentAmount || 149.00,
+                paymentDate: profile.joinedDate,
+                status: 'confirmed',
+                source: 'emergency_profiles'
+            };
+        }
+
+        // Check in PayFast transaction logs (if exists)
+        try {
+            console.log('[PayFast Validator] Attempting to query PayFast_Transactions collection...');
+            const transactionQuery = await wixData.query('PayFast_Transactions')
+                .eq('m_payment_id', paymentReference)
+                .find();
+
+            console.log('[PayFast Validator] PayFast_Transactions query successful');
+
+            if (transactionQuery.items.length > 0) {
+                const transaction = transactionQuery.items[0];
+                return {
+                    isValid: transaction.payment_status === 'COMPLETE',
+                    userId: transaction.custom_str1,
+                    amount: parseFloat(transaction.amount_gross || 0),
+                    paymentDate: transaction._createdDate,
+                    status: transaction.payment_status,
+                    source: 'payfast_transactions'
+                };
+            }
+        } catch (error) {
+            // ULTRA-COMPREHENSIVE PayFast_Transactions collection error handling
+            console.log('[PayFast Validator] PayFast_Transactions query failed - analyzing error...');
+            
+            // Log error details for analysis
+            console.log('[PayFast Validator] Error object:', {
+                message: error?.message,
+                errorCode: error?.errorCode,
+                jsonContent: error?.jsonContent,
+                broadCode: error?.broadCode,
+                name: error?.name,
+                type: typeof error
+            });
+            
+            // Multiple detection patterns for collection not found errors
+            const isCollectionNotFoundError = (
+                // Direct error code matches
+                error?.errorCode === 'WDE0025' ||
+                error?.broadCode === 'WD_SCHEMA_DOES_NOT_EXIST' ||
+                
+                // Message pattern matches
+                error?.message?.includes('PayFast_Transactions') || 
+                error?.message?.includes('collection does not exist') ||
+                error?.message?.includes('SCHEMA_DOES_NOT_EXIST') ||
+                error?.message?.toLowerCase().includes('does not exist') ||
+                
+                // JSON content matches
+                (error?.jsonContent && error.jsonContent.collection === 'PayFast_Transactions') ||
+                (error?.jsonContent && error.jsonContent.errorCode === 'WDE0025') ||
+                (error?.jsonContent && error.jsonContent.broadCode === 'WD_SCHEMA_DOES_NOT_EXIST') ||
+                
+                // String representation matches (fallback)
+                String(error).includes('PayFast_Transactions') ||
+                String(error).includes('WDE0025')
+            );
+            
+            if (isCollectionNotFoundError) {
+                console.log(`[PayFast Validator] ✅ EXPECTED: PayFast_Transactions collection does not exist - PayFast gateway not configured for this site`);
+            } else {
+                console.warn(`[PayFast Validator] ⚠️ UNEXPECTED: PayFast_Transactions collection access error:`, error);
+            }
+        }
+
+        return {
+            isValid: false,
+            reason: 'Payment reference not found in any records'
+        };
+
+    } catch (error) {
+        console.error(`❌ [PayFast Validator] Validation error:`, error);
+        return {
+            isValid: false,
+            reason: `Validation error: ${error.message}`
+        };
+    }
+}

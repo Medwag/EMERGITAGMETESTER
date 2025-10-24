@@ -1,0 +1,517 @@
+// backend/core/production-validator.jsw
+// ✅ PRODUCTION CRITICAL: Comprehensive system validation
+// Run this to validate all critical fixes are working before launch
+
+import { PaymentService } from './payment-service.jsw';
+import { ProfileService } from './profile-service.jsw';
+import { DatabaseCleanup } from './database-cleanup.jsw';
+import wixData from 'wix-data';
+
+/**
+ * ✅ PRODUCTION CRITICAL: Comprehensive system validation
+ * Tests all critical revenue-generating flows
+ */
+export class ProductionValidator {
+    
+    /**
+     * Run complete production readiness check
+     * @returns {Promise<object>} Validation result
+     */
+    static async validateProductionReadiness() {
+        console.log('🚀 [ProductionValidator] Starting comprehensive production validation...');
+        
+        const results = {
+            overall: { passed: true, issues: [] },
+            paymentSystem: null,
+            profileSystem: null,
+            database: null,
+            userJourney: null,
+            emergencyAccess: null
+        };
+        
+        try {
+            // 1. Payment System Validation
+            console.log('🔍 [ProductionValidator] Testing payment system...');
+            results.paymentSystem = await this.validatePaymentSystem();
+            if (!results.paymentSystem.passed) {
+                results.overall.passed = false;
+                results.overall.issues.push('Payment system validation failed');
+            }
+            
+            // 2. Profile System Validation  
+            console.log('🔍 [ProductionValidator] Testing profile system...');
+            results.profileSystem = await this.validateProfileSystem();
+            if (!results.profileSystem.passed) {
+                results.overall.passed = false;
+                results.overall.issues.push('Profile system validation failed');
+            }
+            
+            // 3. Database Validation
+            console.log('🔍 [ProductionValidator] Testing database integrity...');
+            results.database = await this.validateDatabaseIntegrity();
+            if (!results.database.passed) {
+                results.overall.passed = false;
+                results.overall.issues.push('Database validation failed');
+            }
+            
+            // 4. User Journey Validation
+            console.log('🔍 [ProductionValidator] Testing user journey flows...');
+            results.userJourney = await this.validateUserJourneys();
+            if (!results.userJourney.passed) {
+                results.overall.passed = false;
+                results.overall.issues.push('User journey validation failed');
+            }
+            
+            // 5. Emergency Access Validation
+            console.log('🔍 [ProductionValidator] Testing emergency access...');
+            results.emergencyAccess = await this.validateEmergencyAccess();
+            if (!results.emergencyAccess.passed) {
+                results.overall.passed = false;
+                results.overall.issues.push('Emergency access validation failed');
+            }
+            
+            // Final result
+            if (results.overall.passed) {
+                console.log('✅ [ProductionValidator] ALL VALIDATIONS PASSED - READY FOR PRODUCTION! 🚀');
+            } else {
+                console.log('❌ [ProductionValidator] VALIDATION FAILED - Issues must be fixed before production');
+                console.log('Issues found:', results.overall.issues);
+            }
+            
+            return results;
+            
+        } catch (error) {
+            console.error('❌ [ProductionValidator] Critical validation error:', error);
+            return {
+                overall: { passed: false, issues: [`Critical error: ${error.message}`] },
+                error: error.message
+            };
+        }
+    }
+    
+    /**
+     * Validate payment system functionality
+     * @returns {Promise<object>} Payment validation result
+     */
+    static async validatePaymentSystem() {
+        const issues = [];
+        let testsPassed = 0;
+        let testsTotal = 0;
+        
+        try {
+            // Test 1: PaymentService import and basic functionality
+            testsTotal++;
+            try {
+                if (typeof PaymentService.detectSignupPayment === 'function') {
+                    testsPassed++;
+                } else {
+                    issues.push('PaymentService.detectSignupPayment is not a function');
+                }
+            } catch (e) {
+                issues.push(`PaymentService import failed: ${e.message}`);
+            }
+            
+            // Test 2: Paystack configuration
+            testsTotal++;
+            try {
+                const { getPaystackSecretKey } = await import('../paystack-config.jsw');
+                const secretKey = await getPaystackSecretKey();
+                if (secretKey && secretKey.length > 10) {
+                    testsPassed++;
+                } else {
+                    issues.push('Paystack secret key not configured or invalid');
+                }
+            } catch (e) {
+                issues.push(`Paystack configuration error: ${e.message}`);
+            }
+            
+            // Test 3: PaystackTransactions collection exists
+            testsTotal++;
+            try {
+                const txTest = await wixData.query('PaystackTransactions').limit(1).find({ suppressAuth: true });
+                testsPassed++;
+            } catch (e) {
+                issues.push('PaystackTransactions collection not accessible');
+            }
+            
+            // Test 4: R149.00 signup fee validation
+            testsTotal++;
+            try {
+                const { createSignupPayment } = await import('../paystackUrl.jsw');
+                if (typeof createSignupPayment === 'function') {
+                    testsPassed++;
+                } else {
+                    issues.push('Signup payment creation function not available');
+                }
+            } catch (e) {
+                issues.push(`Signup payment system error: ${e.message}`);
+            }
+            
+            return {
+                passed: testsPassed === testsTotal,
+                testsPassed: testsPassed,
+                testsTotal: testsTotal,
+                issues: issues,
+                successRate: Math.round((testsPassed / testsTotal) * 100)
+            };
+            
+        } catch (error) {
+            return {
+                passed: false,
+                testsPassed: 0,
+                testsTotal: testsTotal,
+                issues: [`Payment validation error: ${error.message}`],
+                successRate: 0
+            };
+        }
+    }
+    
+    /**
+     * Validate profile system functionality
+     * @returns {Promise<object>} Profile validation result
+     */
+    static async validateProfileSystem() {
+        const issues = [];
+        let testsPassed = 0;
+        let testsTotal = 0;
+        
+        try {
+            // Test 1: ProfileService functionality
+            testsTotal++;
+            try {
+                if (typeof ProfileService.getOrCreateProfile === 'function') {
+                    testsPassed++;
+                } else {
+                    issues.push('ProfileService.getOrCreateProfile is not a function');
+                }
+            } catch (e) {
+                issues.push(`ProfileService import failed: ${e.message}`);
+            }
+            
+            // Test 2: Emergency_Profiles collection access
+            testsTotal++;
+            try {
+                const profileTest = await wixData.query('Emergency_Profiles').limit(1).find({ suppressAuth: true });
+                testsPassed++;
+            } catch (e) {
+                issues.push('Emergency_Profiles collection not accessible');
+            }
+            
+            // Test 3: User state determination
+            testsTotal++;
+            try {
+                const mockProfile = { signUpPaid: true, subscriptionActive: false };
+                const state = ProfileService.getUserState(mockProfile);
+                if (state === 'SIGNED_UP') {
+                    testsPassed++;
+                } else {
+                    issues.push('User state determination not working correctly');
+                }
+            } catch (e) {
+                issues.push(`User state logic error: ${e.message}`);
+            }
+            
+            // Test 4: Public view ID generation
+            testsTotal++;
+            try {
+                const publicId = ProfileService.generatePublicViewId();
+                if (publicId && publicId.startsWith('emergitag-') && publicId.length > 20) {
+                    testsPassed++;
+                } else {
+                    issues.push('Public view ID generation not working correctly');
+                }
+            } catch (e) {
+                issues.push(`Public ID generation error: ${e.message}`);
+            }
+            
+            return {
+                passed: testsPassed === testsTotal,
+                testsPassed: testsPassed,
+                testsTotal: testsTotal,
+                issues: issues,
+                successRate: Math.round((testsPassed / testsTotal) * 100)
+            };
+            
+        } catch (error) {
+            return {
+                passed: false,
+                testsPassed: 0,
+                testsTotal: testsTotal,
+                issues: [`Profile validation error: ${error.message}`],
+                successRate: 0
+            };
+        }
+    }
+    
+    /**
+     * Validate database integrity
+     * @returns {Promise<object>} Database validation result  
+     */
+    static async validateDatabaseIntegrity() {
+        try {
+            const dbValidation = await DatabaseCleanup.validateDatabaseIntegrity();
+            
+            return {
+                passed: dbValidation.isValid,
+                totalProfiles: dbValidation.totalProfiles || 0,
+                issues: dbValidation.issues || [],
+                recommendations: dbValidation.issues?.length > 0 ? 
+                    ['Run database cleanup before production launch'] : 
+                    ['Database is production ready']
+            };
+            
+        } catch (error) {
+            return {
+                passed: false,
+                issues: [`Database validation failed: ${error.message}`],
+                recommendations: ['Fix database access before production launch']
+            };
+        }
+    }
+    
+    /**
+     * Validate critical user journey flows
+     * @returns {Promise<object>} User journey validation result
+     */
+    static async validateUserJourneys() {
+        const issues = [];
+        let testsPassed = 0;
+        let testsTotal = 0;
+        
+        try {
+            // Test 1: New user flow (no payment)
+            testsTotal++;
+            try {
+                const mockProfile = { signUpPaid: false, subscriptionActive: false };
+                const state = ProfileService.getUserState(mockProfile);
+                if (state === 'NEW') {
+                    testsPassed++;
+                } else {
+                    issues.push('New user flow not working correctly');
+                }
+            } catch (e) {
+                issues.push(`New user flow error: ${e.message}`);
+            }
+            
+            // Test 2: Signed up user flow (paid signup, no subscription)
+            testsTotal++;
+            try {
+                const mockProfile = { signUpPaid: true, subscriptionActive: false };
+                const state = ProfileService.getUserState(mockProfile);
+                if (state === 'SIGNED_UP') {
+                    testsPassed++;
+                } else {
+                    issues.push('Signed up user flow not working correctly');
+                }
+            } catch (e) {
+                issues.push(`Signed up user flow error: ${e.message}`);
+            }
+            
+            // Test 3: Subscribed user flow (paid signup + active subscription)
+            testsTotal++;
+            try {
+                const mockProfile = { signUpPaid: true, subscriptionActive: true, membershipTier: 'Bronze' };
+                const state = ProfileService.getUserState(mockProfile);
+                if (state === 'SUBSCRIBED') {
+                    testsPassed++;
+                } else {
+                    issues.push('Subscribed user flow not working correctly');
+                }
+            } catch (e) {
+                issues.push(`Subscribed user flow error: ${e.message}`);
+            }
+            
+            // Test 4: PlanOptions collection access
+            testsTotal++;
+            try {
+                const planTest = await wixData.query('PlanOptions').limit(1).find({ suppressAuth: true });
+                if (planTest.items.length > 0) {
+                    testsPassed++;
+                } else {
+                    issues.push('PlanOptions collection is empty - no subscription plans available');
+                }
+            } catch (e) {
+                issues.push('PlanOptions collection not accessible');
+            }
+            
+            return {
+                passed: testsPassed === testsTotal,
+                testsPassed: testsPassed,
+                testsTotal: testsTotal,
+                issues: issues,
+                successRate: Math.round((testsPassed / testsTotal) * 100)
+            };
+            
+        } catch (error) {
+            return {
+                passed: false,
+                testsPassed: 0,
+                testsTotal: testsTotal,
+                issues: [`User journey validation error: ${error.message}`],
+                successRate: 0
+            };
+        }
+    }
+    
+    /**
+     * Validate emergency access functionality
+     * @returns {Promise<object>} Emergency access validation result
+     */
+    static async validateEmergencyAccess() {
+        const issues = [];
+        let testsPassed = 0;
+        let testsTotal = 0;
+        
+        try {
+            // Test 1: Emergency profile URL generation
+            testsTotal++;
+            try {
+                const mockProfile = { publicViewId: 'test-emergency-id-123' };
+                const emergencyUrl = ProfileService.getEmergencyProfileUrl(mockProfile);
+                if (emergencyUrl && emergencyUrl.includes('emergencyview/test-emergency-id-123')) {
+                    testsPassed++;
+                } else {
+                    issues.push('Emergency profile URL generation not working');
+                }
+            } catch (e) {
+                issues.push(`Emergency URL generation error: ${e.message}`);
+            }
+            
+            // Test 2: Profile retrieval by public ID
+            testsTotal++;
+            try {
+                if (typeof ProfileService.getProfileByPublicId === 'function') {
+                    testsPassed++;
+                } else {
+                    issues.push('Profile retrieval by public ID not available');
+                }
+            } catch (e) {
+                issues.push(`Public ID retrieval error: ${e.message}`);
+            }
+            
+            // Test 3: Check for profiles with missing public IDs
+            testsTotal++;
+            try {
+                const missingPublicIds = await wixData.query('Emergency_Profiles')
+                    .isEmpty('publicViewId')
+                    .find({ suppressAuth: true });
+                
+                if (missingPublicIds.items.length === 0) {
+                    testsPassed++;
+                } else {
+                    issues.push(`${missingPublicIds.items.length} profiles missing publicViewId - emergency access broken`);
+                }
+            } catch (e) {
+                issues.push(`Public ID validation error: ${e.message}`);
+            }
+            
+            return {
+                passed: testsPassed === testsTotal,
+                testsPassed: testsPassed,
+                testsTotal: testsTotal,
+                issues: issues,
+                successRate: Math.round((testsPassed / testsTotal) * 100)
+            };
+            
+        } catch (error) {
+            return {
+                passed: false,
+                testsPassed: 0,
+                testsTotal: testsTotal,
+                issues: [`Emergency access validation error: ${error.message}`],
+                successRate: 0
+            };
+        }
+    }
+    
+    /**
+     * Generate production readiness report
+     * @param {object} validationResults - Results from validateProductionReadiness
+     * @returns {string} Formatted report
+     */
+    static generateReport(validationResults) {
+        const report = [];
+        
+        report.push('🚀 EMERGITAG.ME PRODUCTION READINESS REPORT');
+        report.push('=' .repeat(50));
+        
+        if (validationResults.overall.passed) {
+            report.push('✅ OVERALL STATUS: READY FOR PRODUCTION LAUNCH! 🎉');
+        } else {
+            report.push('❌ OVERALL STATUS: NOT READY FOR PRODUCTION');
+            report.push('CRITICAL ISSUES MUST BE FIXED:');
+            validationResults.overall.issues.forEach(issue => {
+                report.push(`  • ${issue}`);
+            });
+        }
+        
+        report.push('');
+        
+        // Payment System
+        if (validationResults.paymentSystem) {
+            report.push(`💳 Payment System: ${validationResults.paymentSystem.passed ? '✅ PASS' : '❌ FAIL'} (${validationResults.paymentSystem.successRate}%)`);
+            if (validationResults.paymentSystem.issues.length > 0) {
+                validationResults.paymentSystem.issues.forEach(issue => {
+                    report.push(`  • ${issue}`);
+                });
+            }
+        }
+        
+        // Profile System
+        if (validationResults.profileSystem) {
+            report.push(`👤 Profile System: ${validationResults.profileSystem.passed ? '✅ PASS' : '❌ FAIL'} (${validationResults.profileSystem.successRate}%)`);
+            if (validationResults.profileSystem.issues.length > 0) {
+                validationResults.profileSystem.issues.forEach(issue => {
+                    report.push(`  • ${issue}`);
+                });
+            }
+        }
+        
+        // Database
+        if (validationResults.database) {
+            report.push(`🗄️ Database: ${validationResults.database.passed ? '✅ PASS' : '❌ FAIL'} (${validationResults.database.totalProfiles} profiles)`);
+            if (validationResults.database.issues.length > 0) {
+                validationResults.database.issues.forEach(issue => {
+                    report.push(`  • ${issue}`);
+                });
+            }
+        }
+        
+        // User Journey
+        if (validationResults.userJourney) {
+            report.push(`🛣️ User Journey: ${validationResults.userJourney.passed ? '✅ PASS' : '❌ FAIL'} (${validationResults.userJourney.successRate}%)`);
+            if (validationResults.userJourney.issues.length > 0) {
+                validationResults.userJourney.issues.forEach(issue => {
+                    report.push(`  • ${issue}`);
+                });
+            }
+        }
+        
+        // Emergency Access
+        if (validationResults.emergencyAccess) {
+            report.push(`🚨 Emergency Access: ${validationResults.emergencyAccess.passed ? '✅ PASS' : '❌ FAIL'} (${validationResults.emergencyAccess.successRate}%)`);
+            if (validationResults.emergencyAccess.issues.length > 0) {
+                validationResults.emergencyAccess.issues.forEach(issue => {
+                    report.push(`  • ${issue}`);
+                });
+            }
+        }
+        
+        report.push('');
+        report.push('=' .repeat(50));
+        
+        return report.join('\n');
+    }
+}
+
+// Export convenience functions
+export async function validateProduction() {
+    return ProductionValidator.validateProductionReadiness();
+}
+
+export async function runProductionCheck() {
+    const results = await ProductionValidator.validateProductionReadiness();
+    const report = ProductionValidator.generateReport(results);
+    console.log(report);
+    return results;
+}

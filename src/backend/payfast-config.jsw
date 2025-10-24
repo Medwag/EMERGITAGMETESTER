@@ -1,0 +1,12 @@
+// backend/payfast-config.jsw
+// Thin wrapper to expose the PayFast configuration API
+// Many modules import from 'backend/payfast-config.jsw'; this file
+// re-exports the implementation from payfast-config-fixed.jsw
+
+export {
+  getPayFastConfig,
+  getPayFastCredentials,
+  getPayFastPaymentUrl,
+  isPayFastSandbox,
+} from './payfast-config-fixed.jsw';
+

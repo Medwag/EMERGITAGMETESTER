@@ -1,0 +1,125 @@
+// Direct PayFast Test - bypassing frontend
+// This will test our PayFast URL generation directly
+
+import { generatePayFastUrl } from 'backend/payfastUrl.jsw';
+
+export async function directPayFastTest() {
+    console.log('🎯 Direct PayFast URL Generation Test');
+    console.log('=====================================');
+    
+    // Simulate typical sign-up parameters with correct types
+    const testData = {
+        memberData: {
+            firstName: 'John',
+            lastName: 'Doe', 
+            email: 'john.doe@example.com'
+        },
+        pricingPlan: {
+            planId: 'premium-monthly',
+            price: 149.00,  // Use the actual signup fee amount
+            name: 'EmergiTag Signup Fee'  // Use the exact item name
+        },
+        planType: 'monthly'
+    };
+    
+    console.log('📋 Test Data:', testData);
+    
+    try {
+        console.log('🔄 Generating PayFast URL...');
+        
+        const result = await generatePayFastUrl(testData);
+        
+        console.log('📤 PayFast Result:', result);
+        
+        if (!result.success) {
+            console.error('❌ PayFast URL generation failed:', result.error);
+            return { success: false, error: result.error };
+        }
+        
+        const url = result.redirectUrl;
+        console.log('🔗 Generated URL Length:', url.length);
+        
+        // Critical Test: Check for [object Promise]
+        const hasPromise = url.includes('[object Promise]');
+        console.log('🔍 Contains [object Promise]:', hasPromise);
+        
+        if (hasPromise) {
+            console.error('❌ CRITICAL ISSUE: URL contains [object Promise]');
+            
+            // Find which parameters contain promises
+            const urlObj = new URL(url);
+            const params = Object.fromEntries(urlObj.searchParams);
+            
+            console.log('🔍 Analyzing parameters:');
+            Object.entries(params).forEach(([key, value]) => {
+                if (value.includes('[object Promise]')) {
+                    console.error(`  ❌ ${key}: ${value}`);
+                } else {
+                    console.log(`  ✅ ${key}: ${value.substring(0, 50)}${value.length > 50 ? '...' : ''}`);
+                }
+            });
+            
+            return { 
+                success: false, 
+                error: 'URL contains [object Promise]',
+                problematicParams: Object.entries(params)
+                    .filter(([k, v]) => v.includes('[object Promise]'))
+                    .map(([k, v]) => k)
+            };
+        }
+        
+        // Parse URL to validate structure
+        const urlObj = new URL(url);
+        const params = Object.fromEntries(urlObj.searchParams);
+        
+        console.log('✅ URL Structure Valid');
+        console.log('📊 Parameter Count:', Object.keys(params).length);
+        
+        // Check key PayFast parameters
+        const requiredParams = ['merchant_id', 'merchant_key', 'amount', 'item_name', 'signature'];
+        const missingParams = requiredParams.filter(param => !params[param]);
+        
+        if (missingParams.length > 0) {
+            console.warn('⚠️ Missing required parameters:', missingParams);
+        } else {
+            console.log('✅ All required parameters present');
+        }
+        
+        console.log('🎉 PayFast URL Test PASSED');
+        console.log('===========================');
+        
+        return {
+            success: true,
+            url: url,
+            parameterCount: Object.keys(params).length,
+            hasPromises: false,
+            params: params
+        };
+        
+    } catch (error) {
+        console.error('❌ Test failed with error:', error);
+        return {
+            success: false,
+            error: error.message
+        };
+    }
+}
+
+// Quick console test runner
+export async function runPayFastConsoleTest() {
+    console.log('\n'.repeat(3));
+    console.log('🚀 STARTING PAYFAST PROMISE RESOLUTION TEST');
+    console.log('============================================');
+    
+    const result = await directPayFastTest();
+    
+    console.log('\n📋 FINAL RESULT:');
+    if (result.success) {
+        console.log('%c✅ TEST PASSED - No [object Promise] detected!', 'color: green; font-weight: bold; font-size: 16px');
+    } else {
+        console.log('%c❌ TEST FAILED - Issues detected', 'color: red; font-weight: bold; font-size: 16px');
+        console.log('Error:', result.error);
+    }
+    
+    return result;
+}

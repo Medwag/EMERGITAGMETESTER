@@ -1,0 +1,288 @@
+// backend/paystack-sync.jsw
+// Synchronizes Emergency_Profiles with Paystack (customers + subscriptions),
+// logs events to PaystackEvents, and raises Discord/Email alerts on issues.
+
+import wixData from 'wix-data';
+import { fetch } from 'wix-fetch';
+import { getOrCreatePaystackCustomer } from 'backend/paystack-utils.jsw';
+import { getPaystackSecretKey, PAYSTACK_CONFIG } from 'backend/paystack-config.jsw';
+import { sendDiscordLog } from 'backend/logger.jsw';
+import { sendEmailAlert } from 'backend/email.jsw';
+
+/* ---------------------------------------------
+   🔧 CONFIG
+---------------------------------------------- */
+const ALERTS = {
+  ENABLE_DISCORD: true,
+  ENABLE_EMAIL: true,
+  ADMIN_EMAIL: 'support@emergitag.me',  // <-- change if needed
+  SITE_NAME: 'EmergiTag.me'
+};
+
+/* ---------------------------------------------
+   🪵 Log to PaystackEvents
+---------------------------------------------- */
+async function logSyncEvent(entry) {
+  try {
+    const log = {
+      userId: entry.userId || 'unknown',
+      email: entry.email || 'unknown',
+      eventType: entry.eventType || 'sync',
+      status: entry.status || 'info',
+      message: entry.message || '',
+      planTier: entry.planTier || null,
+      customerCode: entry.customerCode || null,
+      reference: entry.reference || null,
+      eventPayload: entry.eventPayload ? JSON.stringify(entry.eventPayload, null, 2) : null,
+      createdAt: new Date(),
+      source: 'syncJob'
+    };
+
+    await wixData.insert('PaystackEvents', log, { suppressAuth: true });
+    console.log(`🧾 [Log] ${log.eventType} → ${log.status}: ${log.message}`);
+  } catch (err) {
+    console.error('❌ [logSyncEvent] Error:', err.message);
+  }
+}
+
+/* ---------------------------------------------
+   📨 Send aggregated alerts (called at end)
+---------------------------------------------- */
+async function maybeSendAlerts(title, issues) {
+  if (!issues.length) return;
+
+  const text = [
+    `**${ALERTS.SITE_NAME} – ${title}**`,
+    `Found **${issues.length}** issue(s) during nightly sync:`,
+    '',
+    ...issues.map((i, idx) =>
+      `${idx + 1}. ${i.kind} — ${i.email || 'unknown email'} ` +
+      `${i.customerCode ? `| customer=${i.customerCode}` : ''} ` +
+      `${i.msg ? `\n   • ${i.msg}` : ''}`
+    )
+  ].join('\n');
+
+  const html = `
+    <div style="font-family:system-ui,Segoe UI,Arial">
+      <h2>${ALERTS.SITE_NAME} – ${title}</h2>
+      <p>Found <b>${issues.length}</b> issue(s) during nightly sync:</p>
+      <ol>
+        ${issues.map(i => `
+          <li>
+            <b>${i.kind}</b> — ${i.email || 'unknown email'}
+            ${i.customerCode ? `<div>customer: ${i.customerCode}</div>` : ''}
+            ${i.msg ? `<div>${i.msg}</div>` : ''}
+          </li>
+        `).join('')}
+      </ol>
+      <p style="color:#888">This message was generated automatically by paystack-sync.jsw</p>
+    </div>
+  `;
+
+  try {
+    if (ALERTS.ENABLE_DISCORD) {
+      await sendDiscordLog(text);
+    }
+  } catch (e) {
+    console.warn('⚠️ Discord alert failed:', e.message);
+  }
+
+  try {
+    if (ALERTS.ENABLE_EMAIL && ALERTS.ADMIN_EMAIL) {
+      await sendEmailAlert({
+        to: ALERTS.ADMIN_EMAIL,
+        subject: `${ALERTS.SITE_NAME}: ${title} (${issues.length})`,
+        html
+      });
+    }
+  } catch (e) {
+    console.warn('⚠️ Email alert failed:', e.message);
+  }
+}
+
+/* ---------------------------------------------
+   🔁 SYNC PAYSTACK CUSTOMERS
+---------------------------------------------- */
+export async function syncPaystackCustomerProfiles() {
+  const issues = []; // collect problems to alert at the end
+
+  try {
+    console.log('🚀 Starting Paystack customer synchronization...');
+    const secretKey = await getPaystackSecretKey();
+
+    const profiles = await wixData.query('Emergency_Profiles')
+      .limit(1000)
+      .find({ suppressAuth: true });
+
+    for (const profile of profiles.items) {
+      const { userId, emailAddress, paystackCustomerCode } = profile;
+      if (!emailAddress) {
+        issues.push({ kind: 'Missing Email', email: null, msg: `userId=${userId}` });
+        await logSyncEvent({
+          userId, eventType: 'customer_sync', status: 'skipped',
+          message: 'Profile has no emailAddress'
+        });
+        continue;
+      }
+
+      // 1) Ensure Paystack customer exists
+      let customerCode = paystackCustomerCode;
+      if (!customerCode) {
+        try {
+          customerCode = await getOrCreatePaystackCustomer(userId, emailAddress);
+        } catch (e) {
+          issues.push({ kind: 'Customer Create/Lookup Failed', email: emailAddress, msg: e.message });
+          await logSyncEvent({
+            userId, email: emailAddress, eventType: 'customer_sync',
+            status: 'failed', message: `getOrCreate failed: ${e.message}`
+          });
+          continue;
+        }
+      }
+
+      // 2) Fetch Paystack customer profile (source of truth)
+      const response = await fetch(`${PAYSTACK_CONFIG.API_BASE_URL}/customer/${customerCode}`, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${secretKey}`,
+          'Content-Type': 'application/json'
+        }
+      });
+
+      const result = await response.json();
+      if (!result.status) {
+        issues.push({ kind: 'Paystack Fetch Failed', email: emailAddress, customerCode, msg: result.message || 'Unknown error' });
+        await logSyncEvent({
+          userId, email: emailAddress, customerCode, eventType: 'customer_sync',
+          status: 'failed', message: 'Customer fetch failed from Paystack', eventPayload: result
+        });
+        continue;
+      }
+
+      const customer = result.data;
+      let updated = false;
+
+      // 3) Ensure local <> Paystack data aligned
+      if (customer.email && profile.emailAddress !== customer.email) {
+        profile.emailAddress = customer.email;
+        updated = true;
+      }
+      if (customer.phone && profile.phone !== customer.phone) {
+        profile.phone = customer.phone;
+        updated = true;
+      }
+
+      profile.paystackCustomerCode = customer.customer_code;
+      profile.lastSyncedWithPaystack = new Date();
+      profile.syncStatus = 'ok';
+
+      if (updated) {
+        await wixData.update('Emergency_Profiles', profile, { suppressAuth: true });
+        await logSyncEvent({
+          userId, email: customer.email, customerCode,
+          eventType: 'customer_sync', status: 'success',
+          message: 'Profile updated from Paystack data', eventPayload: customer
+        });
+        console.log(`🔄 Synced ${emailAddress} with Paystack`);
+      } else {
+        await logSyncEvent({
+          userId, email: emailAddress, customerCode,
+          eventType: 'customer_sync', status: 'ok',
+          message: 'No changes needed (already in sync)'
+        });
+      }
+    }
+
+    console.log('✅ Paystack customer sync completed successfully.');
+  } catch (err) {
+    console.error('❌ syncPaystackCustomerProfiles error:', err);
+    issues.push({ kind: 'Customer Sync Fatal Error', email: null, msg: err.message });
+    await logSyncEvent({
+      eventType: 'customer_sync_error', status: 'failed', message: err.message
+    });
+  } finally {
+    await maybeSendAlerts('Customer Sync Issues', issues);
+  }
+}
+
+/* ---------------------------------------------
+   🔁 SYNC PAYSTACK SUBSCRIPTIONS
+---------------------------------------------- */
+export async function syncPaystackSubscriptions() {
+  const issues = [];
+
+  try {
+    console.log('🚀 Starting Paystack subscription synchronization...');
+    const secretKey = await getPaystackSecretKey();
+
+    const activeProfiles = await wixData.query('Emergency_Profiles')
+      .eq('subscriptionActive', true)
+      .limit(1000)
+      .find({ suppressAuth: true });
+
+    for (const profile of activeProfiles.items) {
+      const code = profile.paystackCustomerCode;
+      if (!code) {
+        issues.push({ kind: 'Missing Customer Code', email: profile.emailAddress, msg: `userId=${profile.userId}` });
+        await logSyncEvent({
+          userId: profile.userId, email: profile.emailAddress,
+          eventType: 'subscription_sync', status: 'skipped',
+          message: 'No paystackCustomerCode on profile'
+        });
+        continue;
+      }
+
+      // 1) Fetch subscriptions for this customer
+      const response = await fetch(`${PAYSTACK_CONFIG.API_BASE_URL}/subscription?customer=${code}`, {
+        headers: { Authorization: `Bearer ${secretKey}` }
+      });
+
+      const result = await response.json();
+      if (!result.status) {
+        issues.push({ kind: 'Subscription Fetch Failed', email: profile.emailAddress, customerCode: code, msg: result.message || 'Unknown error' });
+        await logSyncEvent({
+          userId: profile.userId, email: profile.emailAddress, customerCode: code,
+          eventType: 'subscription_sync', status: 'failed',
+          message: 'Failed to fetch subscriptions', eventPayload: result
+        });
+        continue;
+      }
+
+      const subs = result.data || [];
+      const activeSub = subs.find(s => s.status === 'active');
+
+      if (!activeSub) {
+        // No active subscription on Paystack, deactivate locally
+        profile.subscriptionActive = false;
+        profile.planStatus = 'expired';
+        await wixData.update('Emergency_Profiles', profile, { suppressAuth: true });
+
+        issues.push({ kind: 'Deactivated (No Active Sub)', email: profile.emailAddress, customerCode: code, msg: 'Paystack shows no active subscription' });
+        await logSyncEvent({
+          userId: profile.userId, email: profile.emailAddress, customerCode: code,
+          eventType: 'subscription_sync', status: 'deactivated',
+          message: 'No active subscription found on Paystack', eventPayload: subs
+        });
+
+        console.log(`⚠️ Deactivated ${profile.emailAddress} — no active subscription`);
+      } else {
+        await logSyncEvent({
+          userId: profile.userId, email: profile.emailAddress, customerCode: code,
+          eventType: 'subscription_sync', status: 'ok',
+          message: 'Subscription verified as active', eventPayload: activeSub
+        });
+        console.log(`🟢 Verified active subscription for ${profile.emailAddress}`);
+      }
+    }
+
+    console.log('✅ Subscription sync complete.');
+  } catch (err) {
+    console.error('❌ syncPaystackSubscriptions error:', err);
+    issues.push({ kind: 'Subscription Sync Fatal Error', email: null, msg: err.message });
+    await logSyncEvent({
+      eventType: 'subscription_sync_error', status: 'failed', message: err.message
+    });
+  } finally {
+    await maybeSendAlerts('Subscription Sync Issues', issues);
+  }
+}

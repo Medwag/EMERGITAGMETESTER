@@ -1,0 +1,94 @@
+// backend/payfast-url-test.jsw
+// Test script to verify PayFast URL generation works correctly
+
+import { createPayfastPayment } from 'backend/payfast.jsw';
+
+export async function testPayfastUrlGeneration() {
+    try {
+        console.log('🧪 Testing PayFast URL generation...');
+        
+        // Test with mock user data
+        const testUserId = 'test-user-123';
+        const testEmail = 'test@emergitag.me';
+        
+        console.log(`Testing with userId: ${testUserId}, email: ${testEmail}`);
+        
+        // Generate PayFast URL
+        const paymentUrl = await createPayfastPayment(testUserId, testEmail);
+        
+        console.log('✅ PayFast URL generated successfully');
+        console.log('URL:', paymentUrl);
+        
+        // Verify URL structure
+        if (!paymentUrl || typeof paymentUrl !== 'string') {
+            throw new Error('PayFast URL is not a valid string');
+        }
+        
+        // Check if URL contains [object Promise]
+        if (paymentUrl.includes('[object Promise]')) {
+            throw new Error('❌ PayFast URL contains [object Promise] - promises not properly awaited!');
+        }
+        
+        // Check if URL has basic required parameters
+        const requiredParams = [
+            'merchant_id=',
+            'merchant_key=',
+            'amount=149.00',
+            'item_name=',
+            'email_address=',
+            'signature='
+        ];
+        
+        for (const param of requiredParams) {
+            if (!paymentUrl.includes(param)) {
+                throw new Error(`Missing required parameter: ${param}`);
+            }
+        }
+        
+        console.log('✅ All required parameters found in URL');
+        console.log('✅ No [object Promise] found in URL');
+        console.log('🎉 PayFast URL generation test PASSED');
+        
+        return {
+            success: true,
+            url: paymentUrl,
+            message: 'PayFast URL generation working correctly'
+        };
+        
+    } catch (error) {
+        console.error('❌ PayFast URL generation test FAILED:', error.message);
+        return {
+            success: false,
+            error: error.message,
+            message: 'PayFast URL generation failed'
+        };
+    }
+}
+
+// Quick validation function
+export async function validatePayfastUrl(url) {
+    try {
+        if (!url || typeof url !== 'string') {
+            return { valid: false, error: 'URL is not a string' };
+        }
+        
+        if (url.includes('[object Promise]')) {
+            return { valid: false, error: 'URL contains [object Promise]' };
+        }
+        
+        const urlObj = new URL(url);
+        const params = new URLSearchParams(urlObj.search);
+        
+        const requiredFields = ['merchant_id', 'merchant_key', 'amount', 'signature'];
+        const missing = requiredFields.filter(field => !params.has(field));
+        
+        if (missing.length > 0) {
+            return { valid: false, error: `Missing required fields: ${missing.join(', ')}` };
+        }
+        
+        return { valid: true, message: 'URL is valid' };
+        
+    } catch (error) {
+        return { valid: false, error: error.message };
+    }
+}

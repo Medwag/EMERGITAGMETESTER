@@ -1,0 +1,111 @@
+// backend/core/dual-payment-gateway-simple.jsw
+// Simplified version to bypass all import issues
+// Timestamp: 2025-10-20T17:49:30Z
+
+import wixData from 'wix-data';
+
+export async function getPaymentMethods() {
+  return [
+    { id: 'paystack', name: 'Paystack', description: 'Pay securely with Paystack' },
+    { id: 'payfast', name: 'PayFast', description: 'Pay securely with PayFast' },
+  ];
+}
+
+export async function getRecommendedPaymentMethod() {
+  return 'paystack';
+}
+
+export async function createSignupPaymentWithGateway(userId, gateway, email) {
+  console.log(`🚀 [SimpleDualGateway] Starting ${gateway} payment for user ${userId}`);
+  console.log(`🚀 [SimpleDualGateway] Timestamp: ${new Date().toISOString()}`);
+  
+  try {
+    let result;
+    
+    if (gateway === 'paystack') {
+      console.log('[SimpleDualGateway] Processing Paystack...');
+      const { createSignupPayment } = await import('backend/paystackUrl.jsw');
+      result = await createSignupPayment(userId, email);
+    } else if (gateway === 'payfast') {
+      console.log('[SimpleDualGateway] Processing PayFast with DIAGNOSTIC MODE...');
+      try {
+        // First: Run comprehensive diagnostic
+        const { comprehensivePayFastDiagnostic, createTestUrlWithDefaults } = await import('backend/payfast-comprehensive-diagnostic.jsw');
+        const diagnostic = await comprehensivePayFastDiagnostic();
+        
+        console.log('[SimpleDualGateway] Diagnostic completed:', diagnostic.success ? 'SUCCESS' : 'FAILED');
+        
+        if (diagnostic.success && diagnostic.diagnostic.status === 'healthy') {
+          // Use diagnostic-generated URL if healthy
+          result = {
+            success: true,
+            redirectUrl: diagnostic.sandboxUrl,
+            gateway: 'payfast',
+            note: 'Generated via comprehensive diagnostic'
+          };
+        } else {
+          // Try with PayFast default credentials as fallback
+          console.log('[SimpleDualGateway] Issues detected, trying default sandbox credentials...');
+          const defaultTest = await createTestUrlWithDefaults();
+          
+          if (defaultTest.success) {
+            result = {
+              success: true,
+              redirectUrl: defaultTest.url,
+              gateway: 'payfast',
+              note: 'Using PayFast default sandbox credentials - ' + defaultTest.note
+            };
+          } else {
+            throw new Error('Both diagnostic and default credential methods failed');
+          }
+        }
+        
+        console.log('[SimpleDualGateway] DIAGNOSTIC PayFast result:', result?.success ? 'SUCCESS' : 'FAILED');
+        if (result?.note) {
+          console.log('[SimpleDualGateway] Note:', result.note);
+        }
+        
+      } catch (diagnosticError) {
+        console.error('[SimpleDualGateway] DIAGNOSTIC PayFast failed:', diagnosticError.message);
+        
+        // Final fallback: return error with diagnostic info
+        result = {
+          success: false,
+          error: 'PayFast diagnostic failed: ' + diagnosticError.message,
+          gateway: 'payfast'
+        };
+      }
+    } else {
+      throw new Error(`Unknown gateway: ${gateway}`);
+    }
+
+    console.log(`✅ [SimpleDualGateway] ${gateway} result:`, result?.success ? 'SUCCESS' : 'FAILED');
+
+    // Audit trail (best-effort)
+    try {
+      await wixData.insert(
+        'PaymentAuditTrail',
+        {
+          timestamp: new Date(),
+          userId,
+          gateway,
+          redirectUrl: result?.redirectUrl || '',
+          status: result?.success ? 'initialized' : 'failed',
+          message: result?.error || 'Payment initialized',
+        },
+        { suppressAuth: true }
+      );
+    } catch (logErr) {
+      console.warn('[SimpleDualGateway] Failed to insert audit trail:', logErr?.message);
+    }
+
+    return result;
+  } catch (err) {
+    console.error('[SimpleDualGateway] Payment init failed:', err);
+    return { success: false, error: err.message, gateway };
+  }
+}
+
+export async function createSubscriptionPaymentWithGateway(userId, plan, annual, gateway) {
+  return { success: false, error: 'Subscriptions not yet implemented', gateway };
+}

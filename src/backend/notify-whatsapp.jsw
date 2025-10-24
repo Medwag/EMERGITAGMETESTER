@@ -1,0 +1,60 @@
+import { getSecret } from 'wix-secrets-backend';
+import { fetch } from 'wix-fetch';
+
+// ✅ Fetch token & phoneId from Wix Secrets
+async function getWhatsAppConfig() {
+    const token = await getSecret("whatsappToken");
+    const phoneId = await getSecret("whatsappPhoneId");
+    if (!token || !phoneId) throw new Error("Missing WhatsApp token or phoneId");
+    return { token, phoneId };
+}
+
+/**
+ * Send WhatsApp Template Message
+ * @param {Object} opts
+ * @param {string} opts.to - recipient phone number
+ * @param {string} opts.template - WhatsApp template name
+ * @param {string[]} [opts.variables] - array of template variables
+ */
+export async function sendWhatsApp({ to, template, variables = [] }) {
+    try {
+        if (!to) throw new Error("Recipient number missing");
+
+        const { token, phoneId } = await getWhatsAppConfig();
+        const recipient = String(to).replace(/\D/g, ''); // clean digits
+
+        const body = {
+            messaging_product: "whatsapp",
+            to: recipient,
+            type: "template",
+            template: {
+                name: template,
+                language: { code: "en" },
+                components: variables.length ? [
+                    {
+                        type: "body",
+                        parameters: variables.map(text => ({ type: "text", text }))
+                    }
+                ] : []
+            }
+        };
+
+        const res = await fetch(`https://graph.facebook.com/v19.0/${phoneId}/messages`, {
+            method: "post",
+            headers: {
+                Authorization: `Bearer ${token}`,
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify(body)
+        });
+
+        const data = await res.json();
+        if (!res.ok) throw new Error(JSON.stringify(data));
+
+        console.log(`✅ WhatsApp (${template}) sent to ${recipient}`, data);
+        return data;
+    } catch (err) {
+        console.error(`❌ WhatsApp send FAILED to ${to}:`, err.message);
+        throw err;
+    }
+}

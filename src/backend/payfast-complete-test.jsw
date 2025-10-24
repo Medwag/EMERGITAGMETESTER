@@ -1,0 +1,152 @@
+// Comprehensive PayFast Integration Test
+// This will test both our signature generation and actual URL creation
+
+import { generatePayFastUrl } from 'backend/payfastUrl.jsw';
+import { testPayFastSignature, testActualPayFastCredentials } from 'backend/payfast-signature-test.jsw';
+import { comprehensivePayFastDiagnostic } from 'backend/payfast-comprehensive-diagnostic.jsw';
+
+export async function runCompletePayFastTest() {
+  console.log('🚀 COMPREHENSIVE PAYFAST INTEGRATION TEST');
+  console.log('=========================================');
+  
+  const results = {
+    timestamp: new Date().toISOString(),
+    tests: [],
+    overallStatus: 'unknown',
+    recommendations: []
+  };
+
+  try {
+    // Test 1: Official PayFast Signature Test
+    console.log('\n📋 TEST 1: PayFast Official Signature Test');
+    console.log('-------------------------------------------');
+    
+    const signatureTest = await testPayFastSignature();
+    results.tests.push({
+      name: 'Official Signature Test',
+      status: signatureTest.success ? 'PASS' : 'FAIL',
+      details: signatureTest
+    });
+    
+    if (signatureTest.success) {
+      console.log('✅ Official signature test PASSED');
+    } else {
+      console.log('❌ Official signature test FAILED');
+      console.log('Generated:', signatureTest.generated);
+      console.log('Expected:', signatureTest.expected);
+    }
+
+    // Test 2: Actual Credentials Test
+    console.log('\n📋 TEST 2: Actual PayFast Credentials Test');
+    console.log('------------------------------------------');
+    
+    const credentialsTest = await testActualPayFastCredentials();
+    results.tests.push({
+      name: 'Actual Credentials Test',
+      status: credentialsTest.success ? 'PASS' : 'FAIL',
+      details: credentialsTest
+    });
+    
+    if (credentialsTest.success) {
+      console.log('✅ Actual credentials test PASSED');
+      console.log('Signature generated:', credentialsTest.signature);
+      console.log('Environment:', credentialsTest.environment);
+    } else {
+      console.log('❌ Actual credentials test FAILED');
+      console.log('Error:', credentialsTest.error);
+    }
+
+    // Test 3: Full URL Generation Test
+    console.log('\n📋 TEST 3: Full PayFast URL Generation');
+    console.log('-------------------------------------');
+    
+    const testUserId = 'test-user-' + Date.now();
+    const urlTest = await generatePayFastUrl(testUserId, 149.00);
+    
+    results.tests.push({
+      name: 'URL Generation Test',
+      status: urlTest.success ? 'PASS' : 'FAIL',
+      details: {
+        success: urlTest.success,
+        url: urlTest.redirectUrl ? urlTest.redirectUrl.substring(0, 100) + '...' : null,
+        error: urlTest.error,
+        gateway: urlTest.gateway
+      }
+    });
+    
+    if (urlTest.success) {
+      console.log('✅ URL generation PASSED');
+      console.log('Generated URL length:', urlTest.redirectUrl.length);
+      
+      // Check for [object Promise] in URL
+      if (urlTest.redirectUrl.includes('[object Promise]')) {
+        console.log('❌ WARNING: URL still contains [object Promise]');
+        results.recommendations.push('URL contains [object Promise] - promise resolution issue');
+      } else {
+        console.log('✅ No [object Promise] found in URL');
+      }
+      
+    } else {
+      console.log('❌ URL generation FAILED');
+      console.log('Error:', urlTest.error);
+    }
+
+    // Test 4: Comprehensive Diagnostic
+    console.log('\n📋 TEST 4: Comprehensive PayFast Diagnostic');
+    console.log('-------------------------------------------');
+    
+    const diagnostic = await comprehensivePayFastDiagnostic();
+    results.tests.push({
+      name: 'Comprehensive Diagnostic',
+      status: 'INFO',
+      details: diagnostic
+    });
+    
+    console.log('✅ Diagnostic completed - check results for details');
+
+    // Determine overall status
+    const failedTests = results.tests.filter(test => test.status === 'FAIL');
+    if (failedTests.length === 0) {
+      results.overallStatus = 'ALL_TESTS_PASSED';
+      console.log('\n🎉 ALL TESTS PASSED! PayFast integration should work correctly.');
+    } else {
+      results.overallStatus = 'SOME_TESTS_FAILED';
+      console.log(`\n⚠️ ${failedTests.length} test(s) failed. Review issues above.`);
+    }
+
+    // Generate recommendations
+    if (results.overallStatus === 'ALL_TESTS_PASSED') {
+      results.recommendations.push('PayFast integration is ready for production testing');
+      results.recommendations.push('Test with a small amount first to verify payment flow');
+    } else {
+      results.recommendations.push('Fix failed tests before proceeding with payments');
+      if (failedTests.some(t => t.name === 'Official Signature Test')) {
+        results.recommendations.push('Signature algorithm needs further debugging');
+      }
+      if (failedTests.some(t => t.name === 'Actual Credentials Test')) {
+        results.recommendations.push('Check PayFast merchant credentials in Wix Secrets');
+      }
+      if (failedTests.some(t => t.name === 'URL Generation Test')) {
+        results.recommendations.push('Review URL generation code for promise resolution issues');
+      }
+    }
+
+  } catch (error) {
+    console.error('❌ Test suite failed with error:', error);
+    results.overallStatus = 'ERROR';
+    results.error = error.message;
+    results.recommendations.push('Fix test suite errors before proceeding');
+  }
+
+  console.log('\n📊 TEST SUMMARY');
+  console.log('===============');
+  console.log('Overall Status:', results.overallStatus);
+  console.log('Tests Run:', results.tests.length);
+  console.log('Recommendations:', results.recommendations.length);
+  
+  results.recommendations.forEach((rec, index) => {
+    console.log(`${index + 1}. ${rec}`);
+  });
+
+  return results;
+}

@@ -1,0 +1,110 @@
+// backend/paystack.jsw
+import { fetch } from 'wix-fetch';
+import { getPaystackSecretKey, PAYSTACK_CONFIG } from 'backend/paystack-config.jsw';
+import { sendDiscordLog } from 'backend/logger.jsw';
+import wixData from 'wix-data';
+import wixUsersBackend from 'wix-users-backend';
+
+export async function createPaystackPayment(userId, email) {
+    const secretKey = await getPaystackSecretKey();
+    const url = `${PAYSTACK_CONFIG.API_BASE_URL}/transaction/initialize`;
+
+    // Enrich metadata with profile details for reconciliation
+    let profile = null;
+    try {
+        const q = await wixData.query('Emergency_Profiles').eq('_owner', userId).limit(1).find({ suppressAuth: true });
+        profile = q.items && q.items.length > 0 ? q.items[0] : null;
+    } catch (_) {}
+
+    const metadata = { userId, type: "signup" };
+    if (profile) {
+        metadata.fullName = profile.fullName || '';
+        metadata.phone = profile.phone || '';
+        metadata.homeAddress = profile.homeAddress || '';
+        metadata.deliveryAddress = profile.deliveryAddress || '';
+        metadata.emailAddress = profile.emailAddress || email || '';
+        metadata.custom_fields = [
+            { display_name: 'Full Name', variable_name: 'full_name', value: profile.fullName || '' },
+            { display_name: 'Phone', variable_name: 'phone', value: profile.phone || '' },
+            { display_name: 'Home Address', variable_name: 'home_address', value: profile.homeAddress || '' },
+            { display_name: 'Delivery Address', variable_name: 'delivery_address', value: profile.deliveryAddress || '' }
+        ];
+    }
+
+    const payload = {
+        email,
+        amount: 15000, // kobo
+        metadata,
+        callback_url: "https://www.emergitag.me/signup-success"
+    };
+
+    const response = await fetch(url, {
+        method: "POST",
+        headers: {
+            "Authorization": `Bearer ${secretKey}`,
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify(payload)
+    });
+
+    const result = await response.json();
+    sendDiscordLog("📤 Paystack init: " + JSON.stringify(result));
+    return result.data.authorization_url;
+}
+
+/**
+ * Get the user's subscription details from Paystack by resolving their email, then
+ * calling the subscriptions endpoint. Returns the most recent active subscription
+ * if present, otherwise the most recent subscription.
+ * @param {string} userId
+ * @returns {Promise<{success:boolean, status?:string, planName?:string, nextPaymentDate?:Date, subscription_code?:string, data?:any, message?:string}>>
+ */
+export async function getUserSubscriptionDetails(userId) {
+    try {
+        const secretKey = await getPaystackSecretKey();
+        // Resolve email from CMS or user record
+        let email = '';
+        try {
+            const q = await wixData.query('Emergency_Profiles').eq('_owner', userId).limit(1).find({ suppressAuth: true });
+            email = q.items?.[0]?.emailAddress || '';
+        } catch (_) {}
+        if (!email) {
+            try {
+                const user = await wixUsersBackend.getUser(userId);
+                email = user?.loginEmail || '';
+            } catch (_) {}
+        }
+        if (!email) {
+            return { success: false, message: 'Email not found for user' };
+        }
+
+        const url = `${PAYSTACK_CONFIG.API_BASE_URL}/subscription?customer=${encodeURIComponent(email)}`;
+        const response = await fetch(url, {
+            method: 'GET',
+            headers: { Authorization: `Bearer ${secretKey}` }
+        });
+        const json = await response.json();
+        if (!response.ok) {
+            return { success: false, message: json?.message || 'Paystack API error' };
+        }
+
+        const subs = Array.isArray(json?.data) ? json.data : [];
+        if (subs.length === 0) {
+            return { success: true, status: 'none', data: [] };
+        }
+
+        // Prefer active subscriptions with future next_payment_date
+        const active = subs.filter(s => s.status === 'active' && new Date(s.next_payment_date) > new Date());
+        const selected = (active.length ? active : subs).sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
+        return {
+            success: true,
+            status: selected.status,
+            planName: selected?.plan?.name || null,
+            nextPaymentDate: selected?.next_payment_date ? new Date(selected.next_payment_date) : null,
+            subscription_code: selected?.subscription_code,
+            data: selected
+        };
+    } catch (err) {
+        return { success: false, message: err.message };
+    }
+}

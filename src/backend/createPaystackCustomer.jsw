@@ -1,0 +1,40 @@
+import { getPaystackSecretKey, PAYSTACK_CONFIG } from './paystack-config.jsw';
+import { fetch } from 'wix-fetch';
+import wixData from 'wix-data';
+
+export async function createPaystackCustomer(email, userId) {
+    if (!email || !userId) throw new Error("Email and userId are required");
+
+    const secretKey = await getPaystackSecretKey();
+
+    const response = await fetch(`${PAYSTACK_CONFIG.API_BASE_URL}/customer`, {
+        method: "POST",
+        headers: {
+            "Authorization": `Bearer ${secretKey}`,
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ email })
+    });
+
+    const result = await response.json();
+    if (!result.status) throw new Error(result.message);
+
+    const customerCode = result.data.customer_code;
+
+    // Find CMS profile for this user
+    const profileQuery = await wixData.query("Emergency_Profiles")
+        .eq("_owner", userId)
+        .limit(1)
+        .find();
+
+    if (!profileQuery.items.length) {
+        throw new Error("Profile not found for this user");
+    }
+
+    const profile = profileQuery.items[0];
+    profile.customerCode = customerCode;
+
+    await wixData.update("Emergency_Profiles", profile);
+
+    return customerCode;
+}

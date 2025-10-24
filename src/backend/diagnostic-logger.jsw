@@ -1,0 +1,46 @@
+// backend/diagnostic-logger.jsw
+// Enhanced logging for diagnostic results
+import { diagnoseSubscriptionSync } from './subscription-sync-diagnostics.jsw';
+
+/**
+ * Log diagnostic results to Wix backend logs
+ * @param {string} userId - User ID to diagnose
+ */
+export async function logDiagnosticResults(userId) {
+    try {
+        console.log(`🔍 Starting diagnostic for user: ${userId}`);
+        
+        const diagnostic = await diagnoseSubscriptionSync(userId);
+        
+        // Log structured results
+        console.log('=== SUBSCRIPTION DIAGNOSTIC RESULTS ===');
+        console.log(`User ID: ${diagnostic.userId}`);
+        console.log(`Timestamp: ${diagnostic.timestamp}`);
+        console.log(`CMS Active: ${diagnostic.cms?.subscriptionActive}`);
+        console.log(`Paystack Status: ${diagnostic.paystack?.subscription?.status || 'Not Found'}`);
+        console.log(`Overall Healthy: ${diagnostic.overall?.healthy}`);
+        console.log(`Issues Count: ${diagnostic.issues?.length || 0}`);
+        
+        if (diagnostic.issues?.length > 0) {
+            console.log('Issues Found:');
+            diagnostic.issues.forEach((issue, index) => {
+                console.log(`  ${index + 1}. ${issue}`);
+            });
+        }
+        
+        if (diagnostic.recommendations?.length > 0) {
+            console.log('Recommendations:');
+            diagnostic.recommendations.forEach((rec, index) => {
+                console.log(`  ${index + 1}. ${rec}`);
+            });
+        }
+        
+        console.log('=====================================');
+        
+        return diagnostic;
+        
+    } catch (error) {
+        console.error('❌ Diagnostic logging failed:', error);
+        throw error;
+    }
+}

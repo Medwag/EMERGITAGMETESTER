@@ -1,0 +1,183 @@
+// ✅ backend/paystack-webhooks.jsw
+// EmergiTag.me — Unified Paystack Webhook Handler
+// Handles: charge.success, invoice.update, subscription.create, subscription.disable
+// Writes consistent transaction + event records and syncs Emergency_Profiles status.
+
+import { ok, badRequest, serverError } from 'wix-http-functions';
+import wixData from 'wix-data';
+import { createHmac } from 'crypto';
+
+// ✅ Full backend imports (required for Wix)
+import { getPaystackWebhookSecret } from 'backend/paystack-config.jsw';
+import { handleSubscriptionPayment } from 'backend/paystack-utils.jsw';
+import { logPaystackEvent } from 'backend/paystackSubscriptionWithCustomer.jsw';
+
+export async function post_paystack(request) {
+  try {
+    // 1️⃣ Verify Paystack signature
+    const secret = await getPaystackWebhookSecret();
+    if (!secret) {
+      console.error('❌ Missing Paystack Webhook Secret.');
+      return serverError({ body: { error: 'Webhook secret not configured' } });
+    }
+
+    const signature =
+      request.headers['x-paystack-signature'] ||
+      request.headers['X-Paystack-Signature'];
+    const rawBody = await request.body.text();
+
+    const hash = createHmac('sha512', secret).update(rawBody).digest('hex');
+    if (hash !== signature) {
+      console.warn('⚠️ Invalid Paystack signature. Rejecting request.');
+      return badRequest({ body: 'Invalid signature' });
+    }
+
+    // 2️⃣ Parse event payload
+    const payload = JSON.parse(rawBody);
+    const { event, data } = payload;
+    console.log(`📦 [PaystackWebhook] Event received: ${event}`);
+
+    // 🧱 Normalize key fields
+    const email =
+      data?.customer?.email ||
+      data?.authorization?.email ||
+      data?.metadata?.email ||
+      'unknown';
+
+    const userId = data?.metadata?.userId || null;
+    const reference = data?.reference || `ref-${Date.now()}`;
+
+    // 3️⃣ Save to transaction log (upsert to prevent duplicates)
+    const transaction = {
+      _id: reference,
+      reference,
+      userId,
+      email,
+      amount: (data.amount || 0) / 100,
+      status: data.status || 'unknown',
+      transactionType: data.metadata?.transaction_type || event || 'unknown',
+      paidAt: new Date(data.paid_at || Date.now()),
+      sourceEvent: event,
+      raw: data,
+      updatedAt: new Date()
+    };
+
+    const existing = await wixData
+      .query('PaystackTransactions')
+      .eq('_id', reference)
+      .limit(1)
+      .find({ suppressAuth: true });
+
+    if (existing.items.length > 0) {
+      await wixData.update('PaystackTransactions', transaction, { suppressAuth: true });
+      console.log(`♻️ [Webhook] Updated transaction ${reference}`);
+    } else {
+      await wixData.insert('PaystackTransactions', transaction, { suppressAuth: true });
+      console.log(`✅ [Webhook] Inserted transaction ${reference}`);
+    }
+
+    // 4️⃣ Log the event itself (PaystackEvents)
+    await logPaystackEvent({
+      userId,
+      email,
+      eventType: event,
+      planTier: data?.metadata?.planTier || null,
+      billingCycle: data?.metadata?.billingCycle || null,
+      status: data.status || 'unknown',
+      message: `Webhook event processed: ${event}`,
+      reference,
+      customerCode: data?.customer?.customer_code || null,
+      eventPayload: payload,
+      idempotencyKey: signature
+    });
+
+    // 5️⃣ Sync signup fee payments
+    if (
+      data?.metadata?.transaction_type === 'signup_fee' &&
+      data?.status === 'success'
+    ) {
+      const profileRes = await wixData
+        .query('Emergency_Profiles')
+        .eq('_owner', userId)
+        .limit(1)
+        .find({ suppressAuth: true });
+
+      if (profileRes.items.length > 0) {
+        const p = profileRes.items[0];
+        p.signUpPaid = true;
+        p.signUpReference = reference;
+        p.paymentProvider = 'paystack';
+        p.lastUpdated = new Date();
+        await wixData.update('Emergency_Profiles', p, { suppressAuth: true });
+        console.log(`💰 [Webhook] Synced signup payment for user ${userId}`);
+
+        await logPaystackEvent({
+          userId,
+          email,
+          eventType: 'signup_payment_sync',
+          status: 'success',
+          message: 'Signup payment synced to profile',
+          reference
+        });
+      }
+    }
+
+    // 6️⃣ Handle active subscription-related events
+    if (
+      event === 'charge.success' ||
+      event === 'invoice.update' ||
+      event === 'subscription.create'
+    ) {
+      console.log(`🔄 [Webhook] Handling subscription payment for ${email}`);
+      await handleSubscriptionPayment(data);
+    }
+
+    // 7️⃣ Handle subscription disable
+    else if (event === 'subscription.disable') {
+      const profileRes = await wixData
+        .query('Emergency_Profiles')
+        .eq('email', email)
+        .find({ suppressAuth: true });
+
+      if (profileRes.items.length > 0) {
+        const profile = profileRes.items[0];
+        profile.subscriptionActive = false;
+        profile.planStatus = 'disabled';
+        await wixData.update('Emergency_Profiles', profile, { suppressAuth: true });
+
+        await logPaystackEvent({
+          userId,
+          email,
+          eventType: 'subscription.disable',
+          status: 'success',
+          message: 'Subscription disabled and profile updated',
+          reference
+        });
+
+        console.log(`⚠️ [Webhook] Subscription disabled for ${email}`);
+      }
+    } else {
+      console.log(`ℹ️ [Webhook] No action defined for event type: ${event}`);
+      await logPaystackEvent({
+        userId,
+        email,
+        eventType: event,
+        status: 'ignored',
+        message: 'No matching handler for this event type',
+        reference
+      });
+    }
+
+    // 8️⃣ Confirm receipt to Paystack
+    return ok({ body: { success: true } });
+
+  } catch (err) {
+    console.error('❌ [PaystackWebhook] Error:', err);
+    await logPaystackEvent({
+      eventType: 'webhook_error',
+      status: 'failed',
+      message: err.message || 'Unhandled webhook error'
+    });
+    return serverError({ body: { error: err.message } });
+  }
+}

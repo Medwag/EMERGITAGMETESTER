@@ -1,0 +1,172 @@
+// Paystack Recovery & Sync Utility
+import wixData from 'wix-data';
+import { fetch } from 'wix-fetch';
+import { getPaystackSecretKey } from 'backend/paystack-config.jsw';
+import { sendDiscordAlert } from 'backend/discord-utils.jsw';
+import wixUsersBackend from 'wix-users-backend';
+
+/**
+ * Finds Paystack subscriptions by email and updates Emergency_Profiles with paystackSubscriptionCode if missing.
+ * @param {string} userEmail - The user's email address
+ * @returns {Promise<object>} - Result of sync operation
+ */
+export async function recoverAndSyncPaystackSubscription(userEmail) {
+  try {
+    const secretKey = await getPaystackSecretKey();
+    // Find profile by email
+    const profileRes = await wixData.query('Emergency_Profiles')
+      .eq('email', userEmail)
+      .limit(1)
+      .find({ suppressAuth: true });
+    if (profileRes.items.length === 0) return { error: 'Profile not found' };
+    const profile = profileRes.items[0];
+    if (profile.paystackSubscriptionCode) {
+      return { message: 'Subscription code already present', code: profile.paystackSubscriptionCode };
+    }
+
+    // Search Paystack for customer by email
+    const customerRes = await fetch(`https://api.paystack.co/customer?email=${encodeURIComponent(userEmail)}`, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${secretKey}`,
+        'Content-Type': 'application/json'
+      }
+    });
+    const customerData = await customerRes.json();
+    if (!customerRes.ok || !customerData.data || customerData.data.length === 0) {
+      return { error: 'No Paystack customer found for email' };
+    }
+    const customer = customerData.data[0];
+
+    // Search Paystack for subscriptions for this customer
+    const subsRes = await fetch(`https://api.paystack.co/subscription?customer=${customer.customer_code}`, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${secretKey}`,
+        'Content-Type': 'application/json'
+      }
+    });
+    const subsData = await subsRes.json();
+    if (!subsRes.ok || !subsData.data || subsData.data.length === 0) {
+      return { error: 'No Paystack subscriptions found for customer' };
+    }
+    // Find active subscription
+    const activeSub = subsData.data.find(sub => sub.status === 'active');
+    if (!activeSub) {
+      return { error: 'No active Paystack subscription found' };
+    }
+
+    // Update CMS profile with subscription code
+    await wixData.update('Emergency_Profiles', {
+      _id: profile._id,
+      paystackSubscriptionCode: activeSub.subscription_code,
+      subscriptionActive: true
+    });
+    return { message: 'Subscription code recovered and CMS updated', code: activeSub.subscription_code };
+  } catch (err) {
+    return { error: err.message };
+  }
+}
+
+/**
+ * Recover missing Paystack customer_code and sync subscriptions to Wix CMS
+ * @param {string} userId - Wix userId
+ * @returns {Promise<object>}
+ */
+export async function recoverAndSyncPaystack(userId) {
+  try {
+    if (!userId) throw new Error("Missing userId");
+
+    // Load the Wix user profile
+    const q = await wixData.query("Emergency_Profiles")
+      .eq("_owner", userId)
+      .limit(1)
+      .find({ suppressAuth: true });
+
+    if (!q.items.length) throw new Error("No Emergency_Profiles found for this userId");
+    let profile = q.items[0];
+
+    const secret = await getPaystackSecretKey();
+    if (!secret) throw new Error("Paystack secret not found");
+
+    // Ensure we have email in the profile
+    let email = profile.emailAddress;
+
+    // Fetch email from Wix Users backend if missing in profile
+    if (!email) {
+        const wixUser = await wixUsersBackend.getUser(userId);
+        if (!wixUser) throw new Error("Wix user not found");
+
+        // emails is an array of strings
+        if (Array.isArray(wixUser.emails) && wixUser.emails.length > 0) {
+            email = wixUser.emails[0]; // directly use string
+        }
+
+        if (!email) throw new Error("Unable to retrieve email from Wix Users backend");
+
+        // Update profile with recovered email
+        profile.emailAddress = email;
+        profile = await wixData.update("Emergency_Profiles", profile, { suppressAuth: true });
+    }
+
+    // Fetch customer info from Paystack
+    const url = `https://api.paystack.co/customer?email=${encodeURIComponent(email)}`;
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: { 'Authorization': `Bearer ${secret}` }
+    });
+
+    const data = await res.json();
+    if (!res.ok) throw new Error(`Paystack API failed: ${data.message || res.status}`);
+    if (!data.data || !data.data.length) return { status: "not_found", message: "No customer in Paystack for this email" };
+
+    const psCustomer = data.data[0];
+    profile.customer_code = psCustomer.customer_code;
+
+    // Fetch subscriptions from Paystack
+    const subUrl = `https://api.paystack.co/subscription?customer=${psCustomer.customer_code}`;
+    const subRes = await fetch(subUrl, { method: 'GET', headers: { 'Authorization': `Bearer ${secret}` } });
+    const subData = await subRes.json();
+
+    if (subRes.ok && subData.data && subData.data.length) {
+      const activeSub = subData.data.find(s => s.status === "active") || subData.data[0];
+      profile.subscriptionId = activeSub.subscription_code || profile.subscriptionId;
+      
+      // SECURITY FIX: Only assign paid tier if subscription is actually active
+      if (activeSub.status === "active" && activeSub.plan?.name) {
+        profile.membershipTier = activeSub.plan.name;
+        profile.signUpPaid = true;
+        profile.planStatus = "active";
+        profile.subscriptionActive = true;
+      } else {
+        profile.membershipTier = "Free"; // Default to free for inactive subscriptions
+        profile.signUpPaid = false;
+        profile.planStatus = activeSub.status || "inactive";
+        profile.subscriptionActive = false;
+      }
+      
+      profile.signUpReference = activeSub.authorization?.authorization_code || activeSub.subscription_code || profile.signUpReference;
+    } else {
+      // No subscription found - ensure Free tier
+      profile.membershipTier = "Free";
+      profile.signUpPaid = false;
+      profile.subscriptionActive = false;
+    }
+
+    // Save updated profile
+    const updated = await wixData.update("Emergency_Profiles", profile, { suppressAuth: true });
+
+    await sendDiscordAlert(`✅ Recovered and synced Paystack info for userId: ${userId}, customer_code: ${profile.customer_code}, subscriptionId: ${profile.subscriptionId}`);
+
+    return { status: "ok", message: "Customer info and subscription synced from Paystack", profile: updated };
+
+  } catch (err) {
+    console.error("❌ recoverAndSyncPaystack error:", err);
+    try {
+      await sendDiscordAlert(`❌ Failed to recover/sync Paystack info for userId: ${userId}\nError: ${err.message}`);
+    } catch(e) {
+      console.error("❌ Failed to send Discord alert:", e);
+    }
+    return { status: "error", message: err.message };
+  }
+}

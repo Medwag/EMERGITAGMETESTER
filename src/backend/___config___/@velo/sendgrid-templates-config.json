@@ -1,0 +1,4 @@
+{
+    "senderEmail": "test@test.com",
+    "emailDefaultContent": "<p>Place your default email content here !</p>"
+}

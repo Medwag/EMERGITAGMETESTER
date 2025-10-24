@@ -1,0 +1,434 @@
+// ✅ backend/signup-payment-detector-dual.jsw
+// Unified Dual Gateway Signup Payment Detection for EmergiTag
+// Combines Paystack and PayFast signup payment detection with confidence scoring
+
+import { detectExistingSignupPayment } from 'backend/signup-payment-detector-enhanced.jsw';
+import { searchPayFastSignupPayments } from 'backend/payfast-signup-detector.jsw';
+import wixData from 'wix-data';
+
+/**
+ * Test function to verify module is loading correctly
+ */
+export function testDualGatewayModule() {
+    console.log('✅ [Test] Dual Gateway module loaded successfully v2.0');
+    return { success: true, version: '2.0', timestamp: new Date().toISOString() };
+}
+
+/**
+ * Unified dual gateway signup payment detection
+ * @param {string} userId - User ID to search for signup payments
+ * @param {object} options - Search options
+ * @returns {Promise<object>} Comprehensive payment detection results
+ */
+export async function detectSignupPayment(userId, options = {}) {
+    const startTime = Date.now();
+    console.log(`🔍 [Dual Gateway v2.0] Starting unified signup payment detection for user: ${userId} at ${new Date().toISOString()}`);
+    
+    const searchOptions = {
+        timeWindow: 30, // days
+        includePartialMatches: true,
+        returnTopCandidates: 3,
+        ...options
+    };
+
+    try {
+        // Step 1: Check if user already has confirmed signup payment
+        const existingStatus = await checkExistingSignupStatus(userId);
+        if (existingStatus.hasConfirmedPayment) {
+            console.log(`✅ [Dual Gateway] User ${userId} already has confirmed signup payment`);
+            return {
+                success: true,
+                paymentDetected: true,
+                source: existingStatus.provider,
+                confidence: 100,
+                paymentReference: existingStatus.reference,
+                existingPayment: true,
+                searchTime: Date.now() - startTime,
+                details: existingStatus
+            };
+        }
+
+        // Step 2: Search both payment providers in parallel
+        console.log(`🚀 [Dual Gateway] Searching both Paystack and PayFast for signup payments`);
+        
+        // Get user email for Paystack search (required by detectExistingSignupPayment)
+        let userEmail = '';
+        try {
+            const profile = await wixData.query("Emergency_Profiles").eq("_owner", userId).limit(1).find();
+            userEmail = profile.items.length > 0 ? profile.items[0].email : '';
+            console.log(`📧 [Dual Gateway] Found email for user search: ${userEmail ? 'Yes' : 'No'}`);
+        } catch (emailErr) {
+            console.warn('⚠️ [Dual Gateway] Could not retrieve user email:', emailErr);
+        }
+        
+        const [paystackResult, payfastResult] = await Promise.allSettled([
+            detectExistingSignupPayment(userEmail, userId),
+            searchPayFastSignupPayments(userId, searchOptions).catch(err => {
+                // Handle PayFast collection errors gracefully  
+                const isCollectionError = (
+                    (err.message && (
+                        err.message.includes('PayFast_Transactions') || 
+                        err.message.includes('collection does not exist')
+                    )) ||
+                    (err.errorCode && err.errorCode === 'WDE0025') ||
+                    (err.jsonContent && err.jsonContent.collection === 'PayFast_Transactions') ||
+                    (err.jsonContent && err.jsonContent.broadCode === 'WD_SCHEMA_DOES_NOT_EXIST')
+                );
+                
+                if (isCollectionError) {
+                    console.log(`ℹ️ [Dual Gateway] PayFast collection not available (${err.errorCode || 'collection missing'}) - continuing with Paystack only`);
+                    return { success: true, matches: [], provider: 'payfast', collectionUnavailable: true };
+                }
+                throw err; // Re-throw other errors
+            })
+        ]);
+
+        // Step 3: Process results
+        const paystackData = paystackResult.status === 'fulfilled' ? paystackResult.value : null;
+        const payfastData = payfastResult.status === 'fulfilled' ? payfastResult.value : null;
+
+        // Log search results
+        if (paystackResult.status === 'rejected') {
+            console.warn(`⚠️ [Dual Gateway] Paystack search failed:`, paystackResult.reason);
+        }
+        if (payfastResult.status === 'rejected') {
+            console.warn(`⚠️ [Dual Gateway] PayFast search failed:`, payfastResult.reason);
+        } else if (payfastData && payfastData.collectionUnavailable) {
+            console.log(`ℹ️ [Dual Gateway] PayFast search completed with collection unavailable - using Paystack as primary`);
+        }
+
+        // Step 4: Analyze and combine results
+        const combinedResult = await analyzePaymentResults(userId, paystackData, payfastData);
+        
+        // Step 5: Update user profile if high-confidence payment found
+        if (combinedResult.paymentDetected && combinedResult.confidence >= 90) {
+            await updateUserSignupPaymentStatus(userId, combinedResult);
+        }
+
+        console.log(`✅ [Dual Gateway] Detection completed in ${Date.now() - startTime}ms`);
+        console.log(`[Dual Gateway] Result: Payment ${combinedResult.paymentDetected ? 'DETECTED' : 'NOT FOUND'} (confidence: ${combinedResult.confidence}%)`);
+
+        return {
+            ...combinedResult,
+            searchTime: Date.now() - startTime
+        };
+
+    } catch (error) {
+        console.error(`❌ [Dual Gateway] Signup payment detection failed:`, error);
+        return {
+            success: false,
+            paymentDetected: false,
+            error: error.message,
+            searchTime: Date.now() - startTime
+        };
+    }
+}
+
+/**
+ * Check existing signup payment status in Emergency_Profiles
+ * @param {string} userId - User ID
+ * @returns {Promise<object>} Existing payment status
+ */
+async function checkExistingSignupStatus(userId) {
+    try {
+        const profileQuery = await wixData.query('Emergency_Profiles')
+            .eq('userId', userId)
+            .find();
+
+        if (profileQuery.items.length > 0) {
+            const profile = profileQuery.items[0];
+            
+            if (profile.signUpPaid === true && profile.signUpReference) {
+                return {
+                    hasConfirmedPayment: true,
+                    provider: profile.paymentProvider || 'unknown',
+                    reference: profile.signUpReference,
+                    paidDate: profile.joinedDate,
+                    amount: profile.paymentAmount
+                };
+            }
+        }
+
+        return { hasConfirmedPayment: false };
+
+    } catch (error) {
+        console.warn(`⚠️ [Dual Gateway] Error checking existing status:`, error);
+        return { hasConfirmedPayment: false };
+    }
+}
+
+/**
+ * Analyze and combine payment results from both providers
+ * @param {string} userId - User ID
+ * @param {object} paystackData - Paystack search results
+ * @param {object} payfastData - PayFast search results
+ * @returns {Promise<object>} Combined analysis result
+ */
+async function analyzePaymentResults(userId, paystackData, payfastData) {
+    console.log(`📊 [Dual Gateway] Analyzing payment results for user: ${userId}`);
+
+    const results = [];
+    
+    // Add Paystack results
+    if (paystackData?.success && paystackData.paymentDetected) {
+        results.push({
+            provider: 'paystack',
+            confidence: paystackData.confidence || 0,
+            reference: paystackData.paymentReference,
+            amount: paystackData.amount,
+            date: paystackData.paymentDate,
+            details: paystackData.bestMatch || paystackData.details,
+            source: 'paystack_api'
+        });
+        console.log(`💳 [Dual Gateway] Paystack payment found - Confidence: ${paystackData.confidence}%`);
+    }
+
+    // Add PayFast results (if available)
+    if (payfastData?.success && payfastData.paymentDetected && !payfastData.collectionUnavailable) {
+        results.push({
+            provider: 'payfast',
+            confidence: payfastData.confidence || 0,
+            reference: payfastData.paymentReference,
+            amount: payfastData.amount,
+            date: payfastData.paymentDate,
+            details: payfastData.bestMatch || payfastData.details,
+            source: 'payfast_itn'
+        });
+        console.log(`💰 [Dual Gateway] PayFast payment found - Confidence: ${payfastData.confidence}%`);
+    } else if (payfastData?.collectionUnavailable) {
+        console.log(`ℹ️ [Dual Gateway] PayFast collection unavailable - skipping PayFast results`);
+    }
+
+    // Analyze results
+    if (results.length === 0) {
+        const payfastUnavailable = payfastData?.collectionUnavailable || false;
+        console.log(`❌ [Dual Gateway] No signup payments found in ${payfastUnavailable ? 'Paystack (PayFast unavailable)' : 'either provider'}`);
+        return {
+            success: true,
+            paymentDetected: false,
+            confidence: 0,
+            provider: null,
+            searchResults: {
+                paystack: paystackData,
+                payfast: payfastData
+            },
+            payfastUnavailable
+        };
+    }
+
+    // Find the best result
+    const bestResult = results.reduce((best, current) => {
+        return current.confidence > best.confidence ? current : best;
+    });
+
+    // Handle multiple results
+    let finalConfidence = bestResult.confidence;
+    let additionalContext = {};
+
+    if (results.length > 1) {
+        console.log(`🔍 [Dual Gateway] Multiple payment results found, analyzing...`);
+        
+        // Check for potential duplicates (same amount, similar dates)
+        const isDuplicate = results.length === 2 && 
+                           Math.abs(parseFloat(results[0].amount) - parseFloat(results[1].amount)) < 0.01 &&
+                           Math.abs(new Date(results[0].date) - new Date(results[1].date)) < 24 * 60 * 60 * 1000;
+
+        if (isDuplicate) {
+            console.log(`⚠️ [Dual Gateway] Potential duplicate payment detected`);
+            finalConfidence = Math.max(finalConfidence - 10, 70); // Reduce confidence for duplicates
+            additionalContext.duplicateWarning = true;
+        } else {
+            console.log(`✅ [Dual Gateway] Multiple valid payments found`);
+            additionalContext.multiplePayments = true;
+        }
+    }
+
+    return {
+        success: true,
+        paymentDetected: true,
+        confidence: finalConfidence,
+        provider: bestResult.provider,
+        paymentReference: bestResult.reference,
+        amount: bestResult.amount,
+        paymentDate: bestResult.date,
+        bestMatch: bestResult,
+        allResults: results,
+        searchResults: {
+            paystack: paystackData,
+            payfast: payfastData
+        },
+        ...additionalContext
+    };
+}
+
+/**
+ * Update user signup payment status based on detection results
+ * @param {string} userId - User ID
+ * @param {object} paymentResult - Payment detection result
+ * @returns {Promise<void>}
+ */
+async function updateUserSignupPaymentStatus(userId, paymentResult) {
+    try {
+        console.log(`📝 [Dual Gateway] Updating user signup payment status: ${userId}`);
+
+        const profileQuery = await wixData.query('Emergency_Profiles')
+            .eq('userId', userId)
+            .find();
+
+        const updateData = {
+            signUpPaid: true,
+            signUpReference: paymentResult.paymentReference,
+            paymentProvider: paymentResult.provider,
+            paymentAmount: parseFloat(paymentResult.amount || 0),
+            joinedDate: new Date(paymentResult.paymentDate || new Date()),
+            paymentDetectionConfidence: paymentResult.confidence,
+            lastUpdated: new Date()
+        };
+
+        if (profileQuery.items.length > 0) {
+            // Update existing profile
+            const profile = profileQuery.items[0];
+            const updatedProfile = { ...profile, ...updateData };
+            
+            await wixData.update('Emergency_Profiles', updatedProfile);
+            console.log(`✅ [Dual Gateway] Existing profile updated for user: ${userId}`);
+        } else {
+            // Create new profile with payment status
+            const newProfile = {
+                userId,
+                ...updateData
+            };
+            
+            await wixData.save('Emergency_Profiles', newProfile);
+            console.log(`✅ [Dual Gateway] New profile created with payment status: ${userId}`);
+        }
+
+    } catch (error) {
+        console.error(`❌ [Dual Gateway] Error updating user payment status:`, error);
+        throw error;
+    }
+}
+
+/**
+ * Search for signup payments across all providers with specific criteria
+ * @param {string} searchCriteria - Email, reference, or user ID
+ * @param {object} options - Search options
+ * @returns {Promise<object>} Search results from all providers
+ */
+export async function searchSignupPaymentsAcrossProviders(searchCriteria, options = {}) {
+    console.log(`🔍 [Dual Gateway] Cross-provider search for: ${searchCriteria}`);
+
+    try {
+        const [paystackResults, payfastResults] = await Promise.allSettled([
+            detectExistingSignupPayment('', searchCriteria), // Note: using empty email since this is a general search
+            searchPayFastSignupPayments(searchCriteria, { 
+                ...options, 
+                searchType: 'comprehensive' 
+            })
+        ]);
+
+        const results = {
+            success: true,
+            searchCriteria,
+            providers: {},
+            totalMatches: 0
+        };
+
+        // Process Paystack results
+        if (paystackResults.status === 'fulfilled' && paystackResults.value?.success) {
+            results.providers.paystack = paystackResults.value;
+            results.totalMatches += paystackResults.value.totalFound || 0;
+        } else {
+            results.providers.paystack = { success: false, error: paystackResults.reason };
+        }
+
+        // Process PayFast results
+        if (payfastResults.status === 'fulfilled' && payfastResults.value?.success) {
+            results.providers.payfast = payfastResults.value;
+            results.totalMatches += payfastResults.value.totalFound || 0;
+        } else {
+            results.providers.payfast = { success: false, error: payfastResults.reason };
+        }
+
+        console.log(`✅ [Dual Gateway] Cross-provider search completed - ${results.totalMatches} total matches`);
+        return results;
+
+    } catch (error) {
+        console.error(`❌ [Dual Gateway] Cross-provider search failed:`, error);
+        return {
+            success: false,
+            error: error.message,
+            searchCriteria
+        };
+    }
+}
+
+/**
+ * Get comprehensive payment statistics for dashboard
+ * @param {object} options - Query options
+ * @returns {Promise<object>} Payment statistics
+ */
+export async function getPaymentStatistics(options = {}) {
+    try {
+        console.log(`📊 [Dual Gateway] Generating payment statistics`);
+        
+        const timeRange = options.timeRange || 30; // days
+        const startDate = new Date(Date.now() - timeRange * 24 * 60 * 60 * 1000);
+
+        // Get user profiles with payment information
+        const profilesQuery = await wixData.query('Emergency_Profiles')
+            .ge('lastUpdated', startDate)
+            .find();
+
+        const stats = {
+            totalUsers: profilesQuery.items.length,
+            paidUsers: 0,
+            paymentProviders: {
+                paystack: 0,
+                payfast: 0,
+                unknown: 0
+            },
+            averageAmount: 0,
+            totalRevenue: 0,
+            timeRange: `${timeRange} days`
+        };
+
+        let totalAmount = 0;
+        let paidCount = 0;
+
+        profilesQuery.items.forEach(profile => {
+            if (profile.signUpPaid) {
+                paidCount++;
+                const amount = parseFloat(profile.paymentAmount || 0);
+                totalAmount += amount;
+
+                const provider = profile.paymentProvider || 'unknown';
+                if (stats.paymentProviders[provider] !== undefined) {
+                    stats.paymentProviders[provider]++;
+                } else {
+                    stats.paymentProviders.unknown++;
+                }
+            }
+        });
+
+        stats.paidUsers = paidCount;
+        stats.totalRevenue = totalAmount;
+        stats.averageAmount = paidCount > 0 ? (totalAmount / paidCount) : 0;
+        stats.conversionRate = stats.totalUsers > 0 ? (paidCount / stats.totalUsers * 100) : 0;
+
+        console.log(`✅ [Dual Gateway] Statistics generated:`, {
+            totalUsers: stats.totalUsers,
+            paidUsers: stats.paidUsers,
+            conversionRate: `${stats.conversionRate.toFixed(1)}%`
+        });
+
+        return stats;
+
+    } catch (error) {
+        console.error(`❌ [Dual Gateway] Error generating statistics:`, error);
+        return {
+            success: false,
+            error: error.message
+        };
+    }
+}

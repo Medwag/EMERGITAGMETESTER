@@ -1,0 +1,283 @@
+// ✅ backend/paystackSubscriptionWithCustomer.jsw
+// EmergiTag.me — Subscription + Event Logging Utilities
+// Handles Paystack subscription creation, verification, and centralized logging.
+
+import wixData from 'wix-data';
+import { fetch } from 'wix-fetch';
+import { getPaystackSecretKey, PAYSTACK_CONFIG } from 'backend/paystack-config.jsw';
+import { getPlanByName } from 'backend/plan-utils.jsw';
+import { getOrCreatePaystackCustomer } from 'backend/paystack-utils.jsw';
+
+/**
+ * ✅ Create Paystack subscription for a user
+ * @param {String} planTier - e.g., Bronze / Silver / Gold / Family / Pet
+ * @param {String} billingCycle - Monthly / Annual
+ * @param {String} userId - Wix User ID (_owner in Emergency_Profiles)
+ */
+export async function createSubscriptionWithCustomer(planTier, billingCycle, userId) {
+  if (!userId) throw new Error('User ID is required');
+  console.log(`🚀 [Paystack] Creating subscription for ${userId} → ${planTier} (${billingCycle})`);
+
+  // 1️⃣ Fetch Emergency Profile
+  const profileRes = await wixData.query('Emergency_Profiles')
+    .eq('_owner', userId)
+    .limit(1)
+    .find({ suppressAuth: true });
+
+  if (!profileRes.items.length) {
+    return { success: false, message: 'No Emergency_Profiles record found for this user' };
+  }
+
+  let profile = profileRes.items[0];
+  const email = profile.emailAddress || profile.email || null;
+  if (!email) {
+    return { success: false, message: 'Profile missing email address — required for Paystack' };
+  }
+
+  // Log start
+  await logPaystackEvent({
+    userId,
+    email,
+    eventType: 'subscription_start',
+    planTier,
+    billingCycle,
+    status: 'pending',
+    message: 'Starting subscription creation'
+  });
+
+  // 2️⃣ Ensure customer exists
+  console.log(`👤 [Paystack] Ensuring customer exists for ${email}`);
+  const customerCode = await getOrCreatePaystackCustomer(userId, email);
+  if (!customerCode) {
+    await logPaystackEvent({
+      userId,
+      email,
+      eventType: 'subscription',
+      planTier,
+      billingCycle,
+      status: 'failed',
+      message: 'Unable to retrieve or create Paystack customer'
+    });
+    return { success: false, message: 'Unable to retrieve or create Paystack customer' };
+  }
+
+  // Save Paystack customer code
+  if (profile.paystackCustomerCode !== customerCode) {
+    profile.paystackCustomerCode = customerCode;
+    await wixData.update('Emergency_Profiles', profile, { suppressAuth: true });
+  }
+
+  // 3️⃣ Get Plan from CMS
+  const plan = await getPlanByName(planTier);
+  if (!plan) {
+    await logPaystackEvent({
+      userId,
+      email,
+      eventType: 'subscription',
+      planTier,
+      billingCycle,
+      customerCode,
+      status: 'failed',
+      message: `Plan not found: ${planTier}`
+    });
+    return { success: false, message: `Plan not found: ${planTier}` };
+  }
+
+  const isAnnual = billingCycle.trim().toLowerCase() === 'annual';
+  const planCode = isAnnual ? plan.paystackPlanCodeAnnual : plan.paystackPlanCode;
+  if (!planCode) {
+    await logPaystackEvent({
+      userId,
+      email,
+      eventType: 'subscription',
+      planTier,
+      billingCycle,
+      customerCode,
+      status: 'failed',
+      message: `Plan code not configured for ${planTier} (${billingCycle})`
+    });
+    return { success: false, message: `Plan code missing for ${planTier} (${billingCycle})` };
+  }
+
+  // 4️⃣ Call Paystack API
+  const secretKey = await getPaystackSecretKey();
+  if (!secretKey) {
+    return { success: false, message: 'Paystack secret key missing in backend config' };
+  }
+
+  const body = {
+    customer: customerCode,
+    plan: planCode,
+    metadata: { userId, planTier, billingCycle },
+    callback_url: 'https://www.emergitag.me/subscription-confirmation'
+  };
+
+  try {
+    const response = await fetch(`${PAYSTACK_CONFIG.API_BASE_URL}/subscription`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${secretKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(body)
+    });
+
+    const result = await response.json();
+
+    // ✅ Subscription Success
+    if (result.status && result.data) {
+      console.log(`✅ [Paystack] Subscription created for ${email}`);
+
+      profile.membershipTier = planTier;
+      profile.subscriptionActive = true;
+      profile.planStatus = 'active';
+      profile.lastSubscriptionRef = result.data.subscription_code || null;
+      await wixData.update('Emergency_Profiles', profile, { suppressAuth: true });
+
+      await logPaystackEvent({
+        userId,
+        email,
+        eventType: 'subscription',
+        planTier,
+        billingCycle,
+        customerCode,
+        reference: result.data.subscription_code,
+        status: 'success',
+        message: 'Subscription created successfully',
+        rawResponse: result
+      });
+
+      return {
+        success: true,
+        authorization_url: result.data.authorization_url,
+        subscription_code: result.data.subscription_code
+      };
+    }
+
+    // ℹ️ Subscription Already Exists
+    if (result.message && result.message.includes('already in place')) {
+      console.log(`ℹ️ [Paystack] Subscription already exists for ${email}`);
+      profile.membershipTier = planTier;
+      profile.subscriptionActive = true;
+      profile.planStatus = 'active';
+      await wixData.update('Emergency_Profiles', profile, { suppressAuth: true });
+
+      await logPaystackEvent({
+        userId,
+        email,
+        eventType: 'subscription',
+        planTier,
+        billingCycle,
+        customerCode,
+        status: 'duplicate',
+        message: 'Subscription already exists',
+        rawResponse: result
+      });
+
+      return { success: true, alreadySubscribed: true, message: 'Subscription already exists.' };
+    }
+
+    // ❌ Subscription Failed
+    console.error('❌ [Paystack] Subscription failed:', result);
+    await logPaystackEvent({
+      userId,
+      email,
+      eventType: 'subscription',
+      planTier,
+      billingCycle,
+      customerCode,
+      status: 'failed',
+      message: result.message || 'Unknown subscription error',
+      rawResponse: result
+    });
+    return { success: false, message: result.message || 'Unknown error' };
+
+  } catch (err) {
+    console.error('💥 [Paystack] Subscription API error:', err);
+    await logPaystackEvent({
+      userId,
+      email,
+      eventType: 'subscription',
+      planTier,
+      billingCycle,
+      status: 'failed',
+      message: err.message || 'Unable to create subscription'
+    });
+    return { success: false, message: err.message };
+  }
+}
+
+/**
+ * ✅ Verify a Paystack subscription by reference
+ * @param {String} reference - Paystack subscription reference
+ */
+export async function verifySubscription(reference) {
+  if (!reference) throw new Error('Reference is required');
+
+  const secretKey = await getPaystackSecretKey();
+  const response = await fetch(`${PAYSTACK_CONFIG.API_BASE_URL}/transaction/verify/${reference}`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${secretKey}` }
+  });
+
+  const result = await response.json();
+  if (!result.status) throw new Error(result.message || 'Verification failed');
+
+  const { email, metadata, status } = result.data;
+  if (status !== 'success') throw new Error('Subscription not successful');
+
+  const profileRes = await wixData.query('Emergency_Profiles')
+    .eq('_owner', metadata.userId)
+    .limit(1)
+    .find({ suppressAuth: true });
+
+  if (!profileRes.items.length) throw new Error('Emergency_Profiles not found during verification');
+
+  const profile = profileRes.items[0];
+  profile.membershipTier = metadata.planTier;
+  profile.email = email;
+  profile.subscriptionActive = true;
+  profile.planStatus = 'active';
+  await wixData.update('Emergency_Profiles', profile, { suppressAuth: true });
+
+  await logPaystackEvent({
+    userId: metadata.userId,
+    email,
+    eventType: 'subscription_verification',
+    planTier: metadata.planTier,
+    status: 'success',
+    message: 'Subscription verified successfully',
+    reference
+  });
+
+  return { success: true, tier: metadata.planTier };
+}
+
+/**
+ * ✅ Centralized Paystack Event Logger
+ * Logs all subscription, payment, and verification events
+ */
+export async function logPaystackEvent(entry) {
+  try {
+    const payload = {
+      userId: entry.userId || 'unknown',
+      email: entry.email || 'unknown',
+      eventType: entry.eventType || 'general',
+      planTier: entry.planTier || null,
+      billingCycle: entry.billingCycle || null,
+      status: entry.status || 'info',
+      message: entry.message || '',
+      reference: entry.reference || null,
+      customerCode: entry.customerCode || null,
+      rawResponse: entry.rawResponse ? JSON.stringify(entry.rawResponse, null, 2) : null,
+      eventPayload: entry.eventPayload ? JSON.stringify(entry.eventPayload, null, 2) : null,
+      idempotencyKey: entry.idempotencyKey || null,
+      createdAt: new Date()
+    };
+
+    await wixData.insert('PaystackEvents', payload, { suppressAuth: true });
+    console.log(`🧾 [PaystackEvents] Logged → ${payload.eventType} [${payload.status}]`);
+  } catch (err) {
+    console.error('❌ [PaystackEvents] Logging failed:', err.message);
+  }
+}

@@ -1,0 +1,64 @@
+// Emergency simplified PayFast URL generator
+// Use this if the main payfastUrl.jsw is causing 500 errors
+
+import { createPayFastSignupParamsSafe } from './payfast-diagnostic.jsw';
+import { generatePayFastSignature, customEncode } from './payfastUtils.jsw';
+
+export async function generatePayFastUrlSafe(paymentData) {
+  console.log('[PayFast Emergency] Generating URL with minimal validation...');
+  
+  try {
+    const { memberData, pricingPlan } = paymentData;
+    const userId = memberData?.userId || 'temp_user';
+    const email = memberData?.email || 'billing@emergitag.me';
+    const amount = pricingPlan?.price || 149.00;
+    
+    console.log('[PayFast Emergency] Input data:', { userId, email, amount });
+    
+    // Get parameters using safe method
+    const params = await createPayFastSignupParamsSafe(userId, email, amount);
+    console.log('[PayFast Emergency] Parameters created:', Object.keys(params));
+    
+    // Simple validation - just check required fields exist
+    if (!params.merchant_id || !params.merchant_key || !params.amount) {
+      throw new Error('Missing required PayFast parameters');
+    }
+    
+    // Generate signature with minimal error handling
+    let signature;
+    try {
+      signature = generatePayFastSignature(params, ''); // No passphrase for now
+      params.signature = signature;
+    } catch (sigError) {
+      console.warn('[PayFast Emergency] Signature generation failed, proceeding without signature');
+      // Continue without signature for debugging
+    }
+    
+    // Build URL
+    const baseUrl = 'https://sandbox.payfast.co.za/eng/process';
+    const queryString = Object.keys(params)
+      .sort()
+      .map(k => `${k}=${customEncode(String(params[k]))}`)
+      .join('&');
+    
+    const redirectUrl = `${baseUrl}?${queryString}`;
+    
+    console.log('[PayFast Emergency] URL generated successfully');
+    console.log('[PayFast Emergency] URL length:', redirectUrl.length);
+    
+    return {
+      success: true,
+      redirectUrl,
+      gateway: 'payfast',
+      note: 'Generated using emergency safe method'
+    };
+    
+  } catch (error) {
+    console.error('[PayFast Emergency] Failed:', error.message);
+    return {
+      success: false,
+      error: error.message,
+      gateway: 'payfast'
+    };
+  }
+}

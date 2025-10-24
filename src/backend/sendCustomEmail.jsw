@@ -1,0 +1,29 @@
+// backend/sendCustomEmail.jsw
+import wixUsersBackend from 'wix-users-backend';
+import { emailContact } from 'wix-crm-backend';
+
+export async function sendWelcomeEmail() {
+  try {
+    const user = wixUsersBackend.currentUser;
+
+    if (!user.loggedIn) {
+      throw new Error("User not logged in");
+    }
+
+    const contactId = user.id; // This is the correct contactId in backend context
+
+    await emailContact('UrDYTwt', contactId); // Replace 'UrDYTwt' with your Triggered Email ID
+
+    return {
+      success: true,
+      message: "✅ Triggered email sent successfully"
+    };
+
+  } catch (error) {
+    console.error("❌ Error sending triggered email:", error);
+    return {
+      success: false,
+      message: error.message
+    };
+  }
+}

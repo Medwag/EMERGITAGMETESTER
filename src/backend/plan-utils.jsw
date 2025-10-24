@@ -1,0 +1,252 @@
+// backend/plan-utils.jsw
+import wixData from 'wix-data';
+
+/**
+ * Centralized plan configuration - fallback if CMS is not available
+ * This should match the PlanOptions collection in your CMS
+ */
+const FALLBACK_PLANS = {
+    BRONZE: {
+        planName: "Bronze",
+        amountMonthly: 29000,    // R290.00 in kobo
+        amountAnnual: 320000,    // R3200.00 in kobo (discounted)
+        paystackPlanCode: "PLN_BRONZE_MONTHLY",
+        paystackPlanCodeAnnual: "PLN_BRONZE_ANNUAL"
+    },
+    SILVER: {
+        planName: "Silver", 
+        amountMonthly: 49000,    // R490.00 in kobo
+        amountAnnual: 540000,    // R5400.00 in kobo
+        paystackPlanCode: "PLN_SILVER_MONTHLY",
+        paystackPlanCodeAnnual: "PLN_SILVER_ANNUAL"
+    },
+    GOLD: {
+        planName: "Gold",
+        amountMonthly: 79000,    // R790.00 in kobo
+        amountAnnual: 870000,    // R8700.00 in kobo
+        paystackPlanCode: "PLN_GOLD_MONTHLY",
+        paystackPlanCodeAnnual: "PLN_GOLD_ANNUAL"
+    },
+    FAMILY: {
+        planName: "Family",
+        amountMonthly: 129000,   // R1290.00 in kobo
+        amountAnnual: 1420000,   // R14200.00 in kobo
+        paystackPlanCode: "PLN_FAMILY_MONTHLY",
+        paystackPlanCodeAnnual: "PLN_FAMILY_ANNUAL"
+    },
+    FAMILY_EXTENDED: {
+        planName: "Family Extended",
+        amountMonthly: 159000,   // R1590.00 in kobo
+        amountAnnual: 1750000,   // R17500.00 in kobo
+        paystackPlanCode: "PLN_FAMEXT_MONTHLY",
+        paystackPlanCodeAnnual: "PLN_FAMEXT_ANNUAL"
+    }
+};
+
+/**
+ * Get a plan from PlanOptions CMS by its plan name
+ * Falls back to hardcoded values if CMS query fails
+ * @param {string} planName - The plan name (e.g., "Bronze", "Silver", etc.)
+ * @returns {Promise<Object|null>} - The plan object, or null if not found
+ */
+export async function getPlanByName(planName) {
+    if (!planName) return null;
+
+    try {
+        // First try to get from CMS
+        const query = await wixData.query("PlanOptions")
+            .eq("planName", planName)
+            .limit(1)
+            .find();
+
+        if (query.items.length > 0) {
+            console.log(`✅ Plan '${planName}' found in CMS`);
+            return query.items[0];
+        }
+
+        // Fallback to hardcoded plans
+        const fallbackKey = planName.toUpperCase().replace(/\s+/g, '_');
+        const fallbackPlan = FALLBACK_PLANS[fallbackKey];
+        
+        if (fallbackPlan) {
+            console.warn(`⚠️ Plan '${planName}' not found in CMS, using fallback configuration`);
+            return fallbackPlan;
+        }
+
+        console.error(`❌ Plan '${planName}' not found in CMS or fallback configuration`);
+        return null;
+
+    } catch (error) {
+        console.error(`❌ Error fetching plan '${planName}':`, error.message);
+        
+        // Try fallback on error
+        const fallbackKey = planName.toUpperCase().replace(/\s+/g, '_');
+        const fallbackPlan = FALLBACK_PLANS[fallbackKey];
+        
+        if (fallbackPlan) {
+            console.warn(`⚠️ Using fallback plan configuration for '${planName}' due to CMS error`);
+            return fallbackPlan;
+        }
+        
+        return null;
+    }
+}
+
+/**
+ * Get a plan from PlanOptions CMS by its Paystack plan code
+ * @param {string} planCode - The Paystack plan code (monthly or annual)
+ * @returns {Promise<Object|null>} - The plan object, or null if not found
+ */
+export async function getPlanByPaystackCode(planCode) {
+    if (!planCode) return null;
+
+    try {
+        // Try CMS first
+        const query = await wixData.query("PlanOptions")
+            .eq("paystackPlanCode", planCode)
+            .or(wixData.query("PlanOptions").eq("paystackPlanCodeAnnual", planCode))
+            .limit(1)
+            .find();
+
+        if (query.items.length > 0) {
+            return query.items[0];
+        }
+
+        // Fallback search in hardcoded plans
+        for (const [key, plan] of Object.entries(FALLBACK_PLANS)) {
+            if (plan.paystackPlanCode === planCode || plan.paystackPlanCodeAnnual === planCode) {
+                console.warn(`⚠️ Plan with code '${planCode}' not found in CMS, using fallback`);
+                return plan;
+            }
+        }
+
+        console.warn(`❌ Plan not found for Paystack code: ${planCode}`);
+        return null;
+
+    } catch (error) {
+        console.error(`❌ Error fetching plan by code '${planCode}':`, error.message);
+        return null;
+    }
+}
+
+/**
+ * Get all available plans
+ * @returns {Promise<Array>} Array of plan objects
+ */
+export async function getAllPlans() {
+    try {
+        const query = await wixData.query("PlanOptions").find();
+        
+        if (query.items.length > 0) {
+            return query.items;
+        }
+
+        // Return fallback plans if CMS is empty
+        console.warn("⚠️ No plans found in CMS, returning fallback plans");
+        return Object.values(FALLBACK_PLANS);
+
+    } catch (error) {
+        console.error("❌ Error fetching all plans:", error.message);
+        return Object.values(FALLBACK_PLANS);
+    }
+}
+
+/**
+ * Validate plan configuration
+ * @param {Object} plan - Plan object to validate
+ * @returns {boolean} True if valid
+ */
+export function validatePlan(plan) {
+    if (!plan) return false;
+    
+    const requiredFields = [
+        'planName', 
+        'amountMonthly', 
+        'paystackPlanCode'
+    ];
+    
+    return requiredFields.every(field => plan.hasOwnProperty(field) && plan[field] !== null);
+}
+
+/**
+ * Normalize a billing cycle value.
+ * @param {('Monthly'|'Annual'|'monthly'|'annual'|boolean)} cycle
+ * @returns {'Monthly'|'Annual'}
+ */
+export function normalizeCycle(cycle) {
+    if (typeof cycle === 'boolean') return cycle ? 'Annual' : 'Monthly';
+    const c = String(cycle || 'Monthly').toLowerCase();
+    return c.startsWith('a') ? 'Annual' : 'Monthly';
+}
+
+/**
+ * Resolve a plan's display name from multiple possible CMS field schemas.
+ * @param {object} plan
+ * @returns {string}
+ */
+export function resolvePlanName(plan) {
+    if (!plan) return 'Plan';
+    return (
+        plan.planTier ||
+        plan.planName ||
+        plan.tierName ||
+        plan.title ||
+        'Plan'
+    );
+}
+
+/**
+ * Resolve monthly and annual prices in ZAR from a plan object that may use
+ * any of the following schemas:
+ *  - monthlyPrice/annualPrice (ZAR)
+ *  - priceMonthly/priceAnnual (ZAR)
+ *  - amountMonthly/amountAnnual (cents/kobo)
+ * @param {object} plan
+ * @returns {{ monthly: number, annual: number }}
+ */
+export function getPlanPriceInfo(plan) {
+    const nz = (v) => (typeof v === 'number' ? v : Number(v || 0));
+
+    // ZAR fields
+    const mp = nz(plan?.monthlyPrice);
+    const ap = nz(plan?.annualPrice);
+    if (mp || ap) return { monthly: mp, annual: ap };
+
+    const pmp = nz(plan?.priceMonthly);
+    const pap = nz(plan?.priceAnnual);
+    if (pmp || pap) return { monthly: pmp, annual: pap };
+
+    // Cents/Kobo fields
+    const amp = nz(plan?.amountMonthly) / 100;
+    const aap = nz(plan?.amountAnnual) / 100;
+    if (amp || aap) return { monthly: amp, annual: aap };
+
+    return { monthly: 0, annual: 0 };
+}
+
+/**
+ * Resolve the price in ZAR for a given cycle.
+ * @param {object} plan
+ * @param {('Monthly'|'Annual'|'monthly'|'annual'|boolean)} cycle
+ * @returns {number}
+ */
+export function resolvePlanAmountZar(plan, cycle = 'Monthly') {
+    const { monthly, annual } = getPlanPriceInfo(plan);
+    return normalizeCycle(cycle) === 'Annual' ? annual : monthly;
+}
+
+/**
+ * Resolve Paystack plan code for the requested cycle.
+ * Supports fields: paystackPlanCode, paystackPlanCodeAnnual
+ * @param {object} plan
+ * @param {('Monthly'|'Annual'|'monthly'|'annual'|boolean)} cycle
+ * @returns {string|null}
+ */
+export function resolvePaystackPlanCode(plan, cycle = 'Monthly') {
+    if (!plan) return null;
+    const isAnnual = normalizeCycle(cycle) === 'Annual';
+    if (isAnnual && plan.paystackPlanCodeAnnual) return plan.paystackPlanCodeAnnual;
+    if (!isAnnual && plan.paystackPlanCode) return plan.paystackPlanCode;
+    // Fallback if only one exists
+    return plan.paystackPlanCode || plan.paystackPlanCodeAnnual || null;
+}

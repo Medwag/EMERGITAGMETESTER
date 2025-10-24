@@ -1,0 +1,263 @@
+// backend/core/profile-service.jsw
+// ✅ PRODUCTION CRITICAL: Consolidated Profile Management Service
+// This ensures reliable profile creation and state management
+console.log('[DEBUG] ✅ Fresh profile-service-fresh.jsw loaded');
+
+
+
+import wixData from 'wix-data';
+import wixUsersBackend from 'wix-users-backend';
+
+/**
+ * ✅ PRODUCTION CRITICAL: Single source of truth for profile management
+ * Ensures consistent profile handling across the entire system
+ */
+export class ProfileService {
+
+    /**
+     * Get or create emergency profile with guaranteed success
+     * @param {string} userId - User ID
+     * @returns {Promise<object>} Profile object
+     */
+    static async getOrCreateProfile(userId) {
+        console.log(`[ProfileService] 🔍 Getting/creating profile for user: ${userId}`);
+        
+        try {
+            // Step 1: Try to find existing profile
+            const existingQuery = await wixData.query('Emergency_Profiles')
+                .eq('_owner', userId)
+                .limit(1)
+                .find({ suppressAuth: true });
+
+            if (existingQuery.items.length > 0) {
+                const profile = existingQuery.items[0];
+                console.log(`✅ [ProfileService] Found existing profile: ${profile._id}`);
+                return profile;
+            }
+
+            // Step 2: No profile exists, create new one
+            console.log(`[ProfileService] Creating new profile for user: ${userId}`);
+            
+            const user = await wixUsersBackend.getUser(userId);
+            const email = user?.contactDetails?.emails?.[0]?.email || `user${userId}@emergitag.me`;
+
+            const newProfile = {
+                _owner: userId,
+                email: email,
+                fullName: `${user?.contactDetails?.firstName || 'Member'} ${user?.contactDetails?.lastName || ''}`.trim(),
+                
+                // Payment status (default: unpaid)
+                signUpPaid: false,
+                signUpReference: null,
+                paymentProvider: null,
+                
+                // Subscription status (default: inactive)
+                subscriptionActive: false,
+                membershipTier: null,
+                planStatus: null,
+                
+                // Generate unique public view ID
+                publicViewId: this.generatePublicViewId(),
+                
+                // Timestamps
+                createdAt: new Date(),
+                lastUpdated: new Date(),
+                
+                // Default contact info (empty but structured)
+                emergencyContact: '',
+                emergencyContactPrimaryNumber: '',
+                relationship: '',
+                
+                // Profile visibility
+                isPublic: false
+            };
+
+            const createdProfile = await wixData.insert('Emergency_Profiles', newProfile, { suppressAuth: true });
+            console.log(`✅ [ProfileService] Created new profile: ${createdProfile._id}`);
+            
+            return createdProfile;
+
+        } catch (error) {
+            console.error(`❌ [ProfileService] Profile creation/retrieval error:`, error);
+            throw new Error(`Profile service error: ${error.message}`);
+        }
+    }
+
+    /**
+     * Update profile with validation and error handling
+     * @param {string} userId - User ID
+     * @param {object} updates - Updates to apply
+     * @returns {Promise<object>} Updated profile
+     */
+    static async updateProfile(userId, updates) {
+        console.log(`[ProfileService] 📝 Updating profile for user: ${userId}`);
+        
+        try {
+            // Get existing profile
+            const profile = await this.getProfile(userId);
+            if (!profile) {
+                throw new Error('Profile not found for update');
+            }
+
+            // Prepare update data
+            const updateData = {
+                _id: profile._id,
+                ...updates,
+                lastUpdated: new Date()
+            };
+
+            // Remove any undefined values
+            Object.keys(updateData).forEach(key => {
+                if (updateData[key] === undefined) {
+                    delete updateData[key];
+                }
+            });
+
+            const updatedProfile = await wixData.update('Emergency_Profiles', updateData, { suppressAuth: true });
+            console.log(`✅ [ProfileService] Updated profile: ${updatedProfile._id}`);
+            
+            return updatedProfile;
+
+        } catch (error) {
+            console.error(`❌ [ProfileService] Profile update error:`, error);
+            throw new Error(`Profile update failed: ${error.message}`);
+        }
+    }
+
+    /**
+     * Get profile by user ID (no creation)
+     * @param {string} userId - User ID
+     * @returns {Promise<object|null>} Profile or null
+     */
+    static async getProfile(userId) {
+        try {
+            const query = await wixData.query('Emergency_Profiles')
+                .eq('_owner', userId)
+                .limit(1)
+                .find({ suppressAuth: true });
+
+            return query.items.length > 0 ? query.items[0] : null;
+
+        } catch (error) {
+            console.error(`❌ [ProfileService] Get profile error:`, error);
+            return null;
+        }
+    }
+
+    /**
+     * Get profile by public view ID (for emergency access)
+     * @param {string} publicViewId - Public view ID
+     * @returns {Promise<object|null>} Profile or null
+     */
+    static async getProfileByPublicId(publicViewId) {
+        try {
+            const query = await wixData.query('Emergency_Profiles')
+                .eq('publicViewId', publicViewId)
+                .limit(1)
+                .find({ suppressAuth: true });
+
+            return query.items.length > 0 ? query.items[0] : null;
+
+        } catch (error) {
+            console.error(`❌ [ProfileService] Get profile by public ID error:`, error);
+            return null;
+        }
+    }
+
+    /**
+     * Determine user state based on payment and subscription status
+     * @param {object} profile - Profile object
+     * @returns {string} User state: 'NEW', 'SIGNED_UP', 'SUBSCRIBED'
+     */
+    static getUserState(profile) {
+        if (!profile) return 'NEW';
+        
+        if (profile.subscriptionActive && profile.membershipTier) {
+            return 'SUBSCRIBED';
+        }
+        
+        if (profile.signUpPaid) {
+            return 'SIGNED_UP';
+        }
+        
+        return 'NEW';
+    }
+
+    /**
+     * Generate unique public view ID
+     * @returns {string} Unique ID
+     */
+    static generatePublicViewId() {
+        const timestamp = Date.now();
+        const random = Math.random().toString(36).substring(2, 10);
+        return `emergitag-${timestamp}-${random}`;
+    }
+
+    /**
+     * Validate profile data completeness for tier access
+     * @param {object} profile - Profile object
+     * @param {string} tier - Membership tier
+     * @returns {object} Validation result
+     */
+    static validateProfileForTier(profile, tier) {
+        const missingFields = [];
+        
+        // Basic required fields for all tiers
+        if (!profile.fullName?.trim()) missingFields.push('Full Name');
+        if (!profile.emergencyContact?.trim()) missingFields.push('Emergency Contact');
+        if (!profile.emergencyContactPrimaryNumber?.trim()) missingFields.push('Emergency Contact Number');
+        if (!profile.relationship?.trim()) missingFields.push('Relationship');
+
+        // Tier-specific requirements
+        switch (tier) {
+            case 'Silver':
+            case 'Gold':
+                if (!profile.medicalInfo?.trim()) missingFields.push('Medical Information');
+                if (!profile.allergies?.trim()) missingFields.push('Allergies');
+                break;
+                
+            case 'Gold':
+                if (!profile.homeGp?.trim()) missingFields.push('Home GP');
+                if (!profile.medicalAidDetailsName?.trim()) missingFields.push('Medical Aid');
+                break;
+        }
+
+        return {
+            isValid: missingFields.length === 0,
+            missingFields: missingFields,
+            completionPercentage: Math.round((1 - missingFields.length / 10) * 100)
+        };
+    }
+
+    /**
+     * Generate emergency profile URL
+     * @param {object} profile - Profile object
+     * @returns {string} Emergency profile URL
+     */
+    static getEmergencyProfileUrl(profile) {
+        if (!profile?.publicViewId) return null;
+        return `https://www.emergitag.me/emergencyview/${profile.publicViewId}`;
+    }
+}
+
+// Export convenience functions for backward compatibility
+export async function createOrGetEmergencyProfile(userId) {
+    return ProfileService.getOrCreateProfile(userId);
+}
+
+export async function getEmergencyProfile(userId) {
+    return ProfileService.getProfile(userId);
+}
+
+export async function updateEmergencyProfile(userId, updates) {
+    return ProfileService.updateProfile(userId, updates);
+}
+
+export function getUserState(profile) {
+    return ProfileService.getUserState(profile);
+}
+
+export function getEmergencyProfileUrl(profile) {
+    return ProfileService.getEmergencyProfileUrl(profile);
+}
+export default ProfileService;

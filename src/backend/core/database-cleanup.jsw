@@ -1,0 +1,302 @@
+// backend/core/database-cleanup.jsw
+// ✅ PRODUCTION CRITICAL: Database schema standardization and cleanup
+// Run this ONCE to clean up inconsistencies in Emergency_Profiles
+
+import wixData from 'wix-data';
+
+/**
+ * ✅ PRODUCTION CRITICAL: Clean and standardize Emergency_Profiles collection
+ * This fixes field inconsistencies and data problems blocking revenue
+ */
+export class DatabaseCleanup {
+    
+    /**
+     * Standardize all profiles in Emergency_Profiles collection
+     * @returns {Promise<object>} Cleanup result
+     */
+    static async standardizeEmergencyProfiles() {
+        console.log('[DatabaseCleanup] 🧹 Starting Emergency_Profiles standardization...');
+        
+        let processed = 0;
+        let errors = 0;
+        const issues = [];
+        
+        try {
+            // Get all profiles in batches to avoid memory issues
+            let skip = 0;
+            const batchSize = 50;
+            let hasMore = true;
+            
+            while (hasMore) {
+                const batch = await wixData.query('Emergency_Profiles')
+                    .limit(batchSize)
+                    .skip(skip)
+                    .find({ suppressAuth: true });
+                    
+                if (batch.items.length === 0) {
+                    hasMore = false;
+                    continue;
+                }
+                
+                console.log(`[DatabaseCleanup] Processing batch: ${skip + 1} to ${skip + batch.items.length}`);
+                
+                for (const profile of batch.items) {
+                    try {
+                        const standardized = await this.standardizeProfile(profile);
+                        if (standardized.needsUpdate) {
+                            await wixData.update('Emergency_Profiles', standardized.profile);
+                            console.log(`✅ [DatabaseCleanup] Standardized profile: ${profile._id}`);
+                        }
+                        processed++;
+                    } catch (profileError) {
+                        console.error(`❌ [DatabaseCleanup] Failed to process profile ${profile._id}:`, profileError);
+                        errors++;
+                        issues.push({
+                            profileId: profile._id,
+                            error: profileError.message
+                        });
+                    }
+                }
+                
+                skip += batchSize;
+            }
+            
+            console.log(`✅ [DatabaseCleanup] Completed! Processed: ${processed}, Errors: ${errors}`);
+            
+            return {
+                success: true,
+                processed: processed,
+                errors: errors,
+                issues: issues
+            };
+            
+        } catch (error) {
+            console.error('[DatabaseCleanup] ❌ Fatal error during cleanup:', error);
+            return {
+                success: false,
+                error: error.message,
+                processed: processed,
+                errors: errors + 1
+            };
+        }
+    }
+    
+    /**
+     * Standardize a single profile
+     * @param {object} profile - Profile to standardize
+     * @returns {Promise<object>} Standardization result
+     */
+    static async standardizeProfile(profile) {
+        let needsUpdate = false;
+        const updates = { _id: profile._id };
+        
+        // 1. Standardize email field (emailAddress → email)
+        if (profile.emailAddress && !profile.email) {
+            updates.email = profile.emailAddress;
+            needsUpdate = true;
+        } else if (!profile.email && profile._owner) {
+            // Try to get email from user if missing
+            try {
+                const user = await import('wix-users-backend').then(m => m.getUser(profile._owner));
+                const userEmail = user?.contactDetails?.emails?.[0]?.email;
+                if (userEmail) {
+                    updates.email = userEmail;
+                    needsUpdate = true;
+                }
+            } catch (e) {
+                console.warn(`Could not get email for user ${profile._owner}`);
+            }
+        }
+        
+        // 2. Ensure publicViewId exists and is unique
+        if (!profile.publicViewId) {
+            updates.publicViewId = this.generateUniquePublicViewId();
+            needsUpdate = true;
+        }
+        
+        // 3. Standardize payment status fields
+        if (profile.signUpPaid === undefined || profile.signUpPaid === null) {
+            updates.signUpPaid = false;
+            needsUpdate = true;
+        }
+        
+        if (profile.subscriptionActive === undefined || profile.subscriptionActive === null) {
+            updates.subscriptionActive = false;
+            needsUpdate = true;
+        }
+        
+        // 4. Clean up membershipTier values
+        if (profile.membershipTier === 'null' || profile.membershipTier === 'undefined') {
+            updates.membershipTier = null;
+            needsUpdate = true;
+        }
+        
+        // 5. Ensure timestamps exist
+        if (!profile.createdAt) {
+            updates.createdAt = profile._dateCreated || new Date();
+            needsUpdate = true;
+        }
+        
+        if (!profile.lastUpdated) {
+            updates.lastUpdated = profile._dateUpdated || new Date();
+            needsUpdate = true;
+        }
+        
+        // 6. Set default values for essential fields
+        if (!profile.fullName || profile.fullName.trim() === '') {
+            updates.fullName = 'Member';
+            needsUpdate = true;
+        }
+        
+        // 7. Ensure isPublic is boolean
+        if (typeof profile.isPublic !== 'boolean') {
+            updates.isPublic = false;
+            needsUpdate = true;
+        }
+        
+        return {
+            needsUpdate: needsUpdate,
+            profile: needsUpdate ? updates : null
+        };
+    }
+    
+    /**
+     * Generate unique public view ID
+     * @returns {string} Unique ID
+     */
+    static generateUniquePublicViewId() {
+        const timestamp = Date.now();
+        const random = Math.random().toString(36).substring(2, 10);
+        return `emergitag-${timestamp}-${random}`;
+    }
+    
+    /**
+     * Validate database integrity after cleanup
+     * @returns {Promise<object>} Validation result
+     */
+    static async validateDatabaseIntegrity() {
+        console.log('[DatabaseCleanup] 🔍 Validating database integrity...');
+        
+        const issues = [];
+        
+        try {
+            // Check for duplicate publicViewIds
+            const allProfiles = await wixData.query('Emergency_Profiles')
+                .find({ suppressAuth: true });
+                
+            const publicViewIds = new Set();
+            const duplicates = [];
+            
+            for (const profile of allProfiles.items) {
+                if (publicViewIds.has(profile.publicViewId)) {
+                    duplicates.push(profile.publicViewId);
+                } else if (profile.publicViewId) {
+                    publicViewIds.add(profile.publicViewId);
+                }
+            }
+            
+            if (duplicates.length > 0) {
+                issues.push(`Duplicate publicViewIds found: ${duplicates.join(', ')}`);
+            }
+            
+            // Check for profiles without essential fields
+            const missingEmail = allProfiles.items.filter(p => !p.email).length;
+            const missingPublicId = allProfiles.items.filter(p => !p.publicViewId).length;
+            const invalidPaymentStatus = allProfiles.items.filter(p => 
+                typeof p.signUpPaid !== 'boolean' || 
+                typeof p.subscriptionActive !== 'boolean'
+            ).length;
+            
+            if (missingEmail > 0) issues.push(`${missingEmail} profiles missing email`);
+            if (missingPublicId > 0) issues.push(`${missingPublicId} profiles missing publicViewId`);
+            if (invalidPaymentStatus > 0) issues.push(`${invalidPaymentStatus} profiles with invalid payment status`);
+            
+            console.log(`✅ [DatabaseCleanup] Validation complete. Issues found: ${issues.length}`);
+            
+            return {
+                success: true,
+                totalProfiles: allProfiles.items.length,
+                issues: issues,
+                isValid: issues.length === 0
+            };
+            
+        } catch (error) {
+            console.error('[DatabaseCleanup] ❌ Validation error:', error);
+            return {
+                success: false,
+                error: error.message,
+                issues: issues
+            };
+        }
+    }
+    
+    /**
+     * Emergency repair for critical production issues
+     * @returns {Promise<object>} Repair result
+     */
+    static async emergencyRepair() {
+        console.log('[DatabaseCleanup] 🚨 Running emergency repair...');
+        
+        const repairs = [];
+        
+        try {
+            // 1. Fix profiles with null/undefined publicViewId (breaks emergency access)
+            const missingPublicId = await wixData.query('Emergency_Profiles')
+                .isEmpty('publicViewId')
+                .find({ suppressAuth: true });
+                
+            for (const profile of missingPublicId.items) {
+                await wixData.update('Emergency_Profiles', {
+                    _id: profile._id,
+                    publicViewId: this.generateUniquePublicViewId()
+                });
+                repairs.push(`Fixed missing publicViewId for profile ${profile._id}`);
+            }
+            
+            // 2. Fix profiles with invalid payment status (blocks revenue flow)
+            const invalidPayment = await wixData.query('Emergency_Profiles')
+                .find({ suppressAuth: true });
+                
+            for (const profile of invalidPayment.items) {
+                if (typeof profile.signUpPaid !== 'boolean' || typeof profile.subscriptionActive !== 'boolean') {
+                    await wixData.update('Emergency_Profiles', {
+                        _id: profile._id,
+                        signUpPaid: profile.signUpPaid === true || profile.signUpPaid === 'true',
+                        subscriptionActive: profile.subscriptionActive === true || profile.subscriptionActive === 'true'
+                    });
+                    repairs.push(`Fixed payment status for profile ${profile._id}`);
+                }
+            }
+            
+            console.log(`✅ [DatabaseCleanup] Emergency repair complete. ${repairs.length} fixes applied.`);
+            
+            return {
+                success: true,
+                repairsApplied: repairs.length,
+                repairs: repairs
+            };
+            
+        } catch (error) {
+            console.error('[DatabaseCleanup] ❌ Emergency repair failed:', error);
+            return {
+                success: false,
+                error: error.message,
+                repairsApplied: repairs.length,
+                repairs: repairs
+            };
+        }
+    }
+}
+
+// Export convenience functions
+export async function standardizeDatabase() {
+    return DatabaseCleanup.standardizeEmergencyProfiles();
+}
+
+export async function validateDatabase() {
+    return DatabaseCleanup.validateDatabaseIntegrity();
+}
+
+export async function emergencyDatabaseRepair() {
+    return DatabaseCleanup.emergencyRepair();
+}

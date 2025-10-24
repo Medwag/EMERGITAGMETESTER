@@ -1,0 +1,274 @@
+import wixData from 'wix-data';
+import { createHmac } from 'crypto';
+import wixSecretsBackend from 'wix-secrets-backend';
+import { fetch } from 'wix-fetch';
+
+// Import other notification services (assuming these are separate .jsw files)
+import { sendEmailAlert } from 'backend/notify-email.jsw';
+import { sendDiscordAlert } from 'backend/notify-discord.jsw';
+
+// === CONFIG ===
+const WHATSAPP_API_VERSION = "v20.0"; 
+const TEMPLATE_NAME_TEST = "emergitag_whatsapp_test"; 
+const TEMPLATE_NAME_PROFILE_VIEW = "emergitag_profile_view_notification"; 
+const TEMPLATE_NAME_SUBSCRIPTION_SUCCESS = "emergitag_subscription_success";
+const TEMPLATE_NAME_PAYMENT_FAILED = "emergitag_payment_failed"; 
+const LANGUAGE_CODE = "en"; // Using generic 'en' as per your template language
+
+// === PAYSTACK WEBHOOK HANDLER ===
+export async function post_paystack(request) {
+    try {
+        console.log("🔹 Incoming Paystack webhook");
+
+        const secret = await wixSecretsBackend.getSecret("paystack");
+        const rawBody = await request.body.text();
+        const signature = request.headers["x-paystack-signature"] || request.headers["X-Paystack-Signature"];
+        const hash = createHmac("sha512", secret).update(rawBody).digest("hex");
+
+        if (hash !== signature) {
+            console.warn("⚠️ Invalid Paystack signature");
+            return { status: 401, body: { error: "Invalid signature" } };
+        }
+
+        const payload = JSON.parse(rawBody);
+        const evt = payload.event;
+        const data = payload.data;
+        const md = data.metadata || {};
+        const userId = md.userId;
+
+        if (!userId) return { status: 400, body: { error: "Missing userId" } };
+
+        const query = await wixData.query("Emergency_Profiles").eq("userId", userId).limit(1).find();
+        if (!query.items.length) return { status: 404, body: { error: "Profile not found" } };
+
+        const profile = query.items[0];
+
+        switch (evt) {
+            case "charge.success":
+            case "subscription.create":
+                await handleSubscription(profile, data, evt);
+                break;
+            case "invoice.payment_failed":
+                await handlePaymentFailed(profile, data);
+                break;
+            default:
+                console.log("ℹ️ Unhandled event:", evt);
+        }
+
+        try {
+            await sendDiscordAlert(`✅ Webhook processed: ${evt} for user ${userId}`);
+        } catch (err) {
+            console.error("❌ Discord log failed:", err.message);
+        }
+
+        return { status: 200, body: { success: true } };
+
+    } catch (err) {
+        console.error("❌ Webhook error:", err.message);
+        return { status: 500, body: { error: err.message } };
+    }
+}
+
+async function handleSubscription(profile, data, evt) {
+    profile.membershipTier = data.metadata?.membershipTier || profile.membershipTier;
+    profile.subscriptionId = data.subscription_code || profile.subscriptionId;
+    profile.signUpPaid = true;
+
+    await wixData.update("Emergency_Profiles", profile);
+    console.log("✅ Profile updated:", profile._id);
+
+    try {
+        const targetNumber = profile.whatsAppNumber || profile.phone;
+        if (profile.waConsent && targetNumber) {
+            await sendTemplateWhatsApp(targetNumber, TEMPLATE_NAME_SUBSCRIPTION_SUCCESS, [
+                {
+                    "type": "body",
+                    "parameters": [
+                        { "type": "text", "text": profile.fullName || "Member" },
+                        { "type": "text", "text": profile.membershipTier || "Unknown" }
+                    ]
+                }
+            ]);
+            console.log("✅ WhatsApp subscription notification sent.");
+        } else {
+            console.log("ℹ️ WhatsApp subscription notification not sent: Consent or number missing.");
+        }
+    } catch (err) { console.error("❌ WhatsApp subscription notification failed:", err.message); }
+
+    try {
+        if (!profile.emailAddress) throw new Error("Email missing for subscription notification");
+        const templateId = evt === 'charge.success' ? 'UrDYTwt' : 'UrJWQIe';
+        await sendEmailAlert(profile.emailAddress, templateId, {
+            fullName: profile.fullName,
+            membershipTier: profile.membershipTier
+        });
+        console.log("✅ Email subscription notification sent.");
+    } catch (err) { console.error("❌ Email subscription notification failed:", err.message); }
+}
+
+async function handlePaymentFailed(profile, data) {
+    try {
+        const targetNumber = profile.whatsAppNumber || profile.phone;
+        if (profile.waConsent && targetNumber) {
+            await sendTemplateWhatsApp(targetNumber, TEMPLATE_NAME_PAYMENT_FAILED, [
+                {
+                    "type": "body",
+                    "parameters": [
+                        { "type": "text", "text": profile.fullName || "Member" }
+                    ]
+                }
+            ]);
+            console.log("✅ WhatsApp payment failed notification sent.");
+        } else {
+            console.log("ℹ️ WhatsApp payment failed notification not sent: Consent or number missing.");
+        }
+    } catch (err) { console.error("❌ WhatsApp payment failed notification failed:", err.message); }
+
+    try {
+        if (!profile.emailAddress) throw new Error("Email missing for payment failed notification");
+        await sendEmailAlert(profile.emailAddress, "Payment Failed Email Template ID", { fullName: profile.fullName });
+        console.log("✅ Email payment failed notification sent.");
+    } catch (err) { console.error("❌ Email payment failed notification failed:", err.message); }
+}
+
+// === PROFILE VIEW NOTIFICATION ===
+export async function profileViewed(profileId, viewerIp, viewerLocation) {
+    try {
+        const result = await wixData.get("Emergency_Profiles", profileId);
+        if (!result) {
+            console.warn(`Profile not found: ${profileId}`);
+            return;
+        }
+
+        if (result.receiveNotifications !== true) {
+            console.log(`WhatsApp consent not given for profile ${profileId}`);
+            return;
+        }
+
+        const fullName = result.fullName || "Client";
+        const publicViewId = result.publicViewId || "";
+        const email = result.emailAddress || null;
+
+        const primaryNumber = result.whatsappPhoneInputPrimary;
+        const additionalNumber = result.whatsappPhoneInputAdditional;
+        const fallbackNumber = result.phone || null;
+
+        let targets = [];
+        if (primaryNumber) targets.push(primaryNumber);
+        if (result.receiveNotifications && additionalNumber) targets.push(additionalNumber);
+        if (targets.length === 0 && fallbackNumber) targets.push(fallbackNumber);
+
+        if (targets.length === 0) {
+            console.log(`No WhatsApp numbers available for profile ${profileId} for profile view notification.`);
+            return;
+        }
+
+        const components = [
+            {
+                "type": "body",
+                "parameters": [
+                    { "type": "text", "text": fullName },
+                    { "type": "text", "text": publicViewId },
+                    { "type": "text", "text": viewerLocation || "Unknown Location" },
+                    { "type": "text", "text": viewerIp || "Unknown IP" }
+                ]
+            }
+        ];
+
+        for (const number of targets) {
+            await sendTemplateWhatsApp(number, TEMPLATE_NAME_PROFILE_VIEW, components);
+            console.log(`✅ WhatsApp profile view notification sent to ${number} for profile ${profileId}.`);
+        }
+
+        if (email) {
+            await sendEmailAlert(email, "ProfileView", {
+                fullName,
+                publicViewId,
+                viewerLocation,
+                viewerIp
+            });
+            console.log(`✅ Email fallback sent to ${email} for profile view notification.`);
+        }
+
+    } catch (err) {
+        console.error("❌ Error in profileViewed:", err);
+    }
+}
+
+/* === Helper: Generic WhatsApp Template Sender === */
+export async function sendTemplateWhatsApp(toNumber, templateName, components = []) {
+    try {
+        const token = await wixSecretsBackend.getSecret("whatsappToken");
+        const phoneId = await wixSecretsBackend.getSecret("whatsappPhoneId");
+        if (!token || !phoneId) {
+            throw new Error("Missing WhatsApp token or phoneId from Secrets Manager. Please ensure these are set up correctly.");
+        }
+
+        const body = {
+            messaging_product: "whatsapp",
+            to: String(toNumber).replace(/\D/g, ''),
+            type: "template",
+            template: {
+                name: templateName,
+                language: { code: LANGUAGE_CODE }, // Use the consistent language code
+                components: components
+            }
+        };
+
+        const res = await fetch(`https://graph.facebook.com/${WHATSAPP_API_VERSION}/${phoneId}/messages`, {
+            method: "post",
+            headers: {
+                Authorization: `Bearer ${token}`,
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify(body)
+        });
+
+        const responseData = await res.json();
+        if (!res.ok) {
+            console.error(`❌ WhatsApp API Error for template '${templateName}' to ${toNumber}: ${JSON.stringify(responseData)}`);
+            throw new Error(`WhatsApp API error: ${JSON.stringify(responseData)}`);
+        }
+        console.log(`✅ Template '${templateName}' sent successfully to ${toNumber}. Response: ${JSON.stringify(responseData)}`);
+        return { success: true, data: responseData };
+    } catch (err) {
+        console.error(`❌ Failed to send WhatsApp template '${templateName}' to ${toNumber}:`, err.message);
+        throw err;
+    }
+}
+
+// Function specifically for sending the "emergitag_whatsapp_test" template
+export async function sendWhatsAppTestMessage(phoneNumbers) {
+    const results = [];
+    for (const number of phoneNumbers) {
+        if (!number) continue;
+
+        try {
+            const data = await sendTemplateWhatsApp(number, TEMPLATE_NAME_TEST, []); 
+            results.push({ number, success: true, data });
+        } catch (err) {
+            results.push({ number, success: false, error: err.message });
+        }
+    }
+    return { sentTo: results.filter(r => r.success).map(r => r.number), failedTo: results.filter(r => !r.success).map(r => r.number), allResults: results };
+}
+
+// Function to log test actions, as called by your dashboard
+export async function logTestAction(logData) {
+    try {
+        await wixData.insert("Test_Action_Logs", {
+            userId: logData.userId,
+            userEmail: logData.userEmail,
+            testType: logData.testType,
+            phoneNumber: logData.phoneNumber,
+            status: logData.status,
+            errorMessage: logData.errorMessage || null,
+            timestamp: new Date()
+        }, { suppressAuth: true });
+        console.log(`✅ Test action logged: ${logData.testType} - ${logData.status}`);
+    } catch (err) {
+        console.error("❌ Failed to log test action:", err);
+    }
+}
+
+// Removed redundant placeholder functions for cleaner code

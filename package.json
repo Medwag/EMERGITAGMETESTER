@@ -1,0 +1,31 @@
+{
+  "devDependencies": {
+    "@wix/cli": "^1.0.0",
+    "@wix/eslint-plugin-cli": "^1.0.0",
+    "eslint": "^8.25.0",
+    "react": "16.14.0"
+  },
+  "dependencies": {
+    "paystack": "2.0.1",
+    "ip6addr": "0.2.5",
+    "@wix/automations": "1.0.223",
+    "@paystack/inline-js": "2.22.7",
+    "wix-crypto": "0.0.0",
+    "node-fetch": "3.3.2",
+    "@wix/crm": "1.0.903",
+    "crypto-js": "4.2.0",
+    "twilio": "5.7.0",
+    "paystack-js": "0.18.1",
+    "@paystack/paystack-sdk": "1.0.1",
+    "@wix/site-storage": "1.22.0",
+    "node": "22.17.1",
+    "paystack-cli": "1.2.3",
+    "@wix/activity-counters": "1.0.77",
+    "@wix/automations-activation-log": "1.0.39"
+  },
+  "scripts": {
+    "postinstall": "wix sync-types",
+    "dev": "wix dev",
+    "lint": "eslint ."
+  }
+}

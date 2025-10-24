@@ -1,0 +1,44 @@
+// backend/courierGuy.jsw
+import { getSecret } from 'wix-secrets-backend';
+import { fetch } from 'wix-fetch';
+
+export async function sendToCourierGuyWithoutBooking(deliveryData) {
+  const username = await getSecret("courierGuyUsername");
+  const password = await getSecret("courierGuyPassword");
+  const account = await getSecret("courierGuyAccount");
+
+  const payload = {
+    user: username,
+    pass: password,
+    acct: account,
+    test: true,
+    delivery_info: {
+      name: deliveryData.fullName,
+      phone: deliveryData.phone,
+      address1: deliveryData.address1,
+      address2: deliveryData.address2,
+      city: deliveryData.city,
+      postal_code: deliveryData.postalCode,
+      province: deliveryData.province,
+      device: deliveryData.deviceChoice
+    }
+  };
+
+  try {
+    const response = await fetch("https://api.thecourierguy.co.za/your-endpoint", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload)
+    });
+
+    const result = await response.json();
+    console.log("📦 Courier Guy API response:", result);
+    return result;
+
+  } catch (error) {
+    console.error("❌ Courier Guy API error:", error);
+    throw error;
+  }
+}

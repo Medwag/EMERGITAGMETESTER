@@ -1,0 +1,25 @@
+// ✅ backend/core/payment-logger.jsw
+import wixData from 'wix-data';
+
+/**
+ * Log any payment-related event
+ * @param {object} entry
+ * @param {string} entry.userId
+ * @param {string} entry.gateway
+ * @param {string} entry.status
+ * @param {string} [entry.message]
+ * @param {string} [entry.redirectUrl]
+ * @param {object} [entry.payload]
+ */
+export async function logPaymentEvent(entry) {
+  try {
+    const log = {
+      timestamp: new Date(),
+      ...entry
+    };
+    await wixData.insert('PaymentAuditTrail', log, { suppressAuth: true });
+    console.log('🪵 [PaymentLogger] Logged:', log);
+  } catch (err) {
+    console.error('❌ [PaymentLogger] Failed to log payment event:', err.message);
+  }
+}

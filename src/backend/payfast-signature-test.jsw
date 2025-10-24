@@ -1,0 +1,106 @@
+// PayFast Signature Test - Test with official PayFast test data
+// Use this to verify our signature generation matches PayFast's expected results
+
+import { generatePayFastSignature } from 'backend/payfastUtils.jsw';
+
+export async function testPayFastSignature() {
+  console.log('🧪 Testing PayFast Signature Generation');
+  console.log('=====================================');
+
+  // Test 1: Official PayFast test data from their documentation
+  const testParams = {
+    merchant_id: 10000100,
+    merchant_key: '46f0cd694581a',
+    amount: '100.00',
+    item_name: 'Test Item',
+    return_url: 'https://www.example.com/return',
+    cancel_url: 'https://www.example.com/cancel',
+    notify_url: 'https://www.example.com/notify'
+  };
+
+  const testPassphrase = 'jt7NOE43FZPn';
+
+  console.log('Test Parameters:', testParams);
+  console.log('Test Passphrase:', testPassphrase);
+
+  // Generate signature
+  const signature = generatePayFastSignature(testParams, testPassphrase);
+  console.log('Generated Signature:', signature);
+
+  // PayFast's expected signature for this data should be: c96a7de90ff289dc83f1c544701ea7c6
+  const expectedSignature = 'c96a7de90ff289dc83f1c544701ea7c6';
+  const isMatch = signature === expectedSignature;
+
+  console.log('Expected Signature:', expectedSignature);
+  console.log('Signatures Match:', isMatch ? '✅ YES' : '❌ NO');
+
+  if (!isMatch) {
+    console.log('🔍 Debugging signature generation:');
+    
+    // Manual signature generation for debugging
+    const sortedKeys = Object.keys(testParams).sort();
+    console.log('Sorted keys:', sortedKeys);
+    
+    const signatureString = sortedKeys
+      .map(key => `${key}=${encodeURIComponent(String(testParams[key]))}`)
+      .join('&');
+    
+    console.log('Signature string:', signatureString);
+    
+    const finalString = `${signatureString}&passphrase=${encodeURIComponent(testPassphrase)}`;
+    console.log('Final string for hashing:', finalString);
+  }
+
+  return {
+    success: isMatch,
+    generated: signature,
+    expected: expectedSignature,
+    testParams,
+    passphrase: testPassphrase
+  };
+}
+
+export async function testActualPayFastCredentials() {
+  console.log('🔐 Testing Actual PayFast Credentials');
+  console.log('====================================');
+  
+  const { getPayFastConfig } = await import('backend/payfast-config-fixed.jsw');
+  const { createPayFastSignupParams } = await import('backend/payfastUtils.jsw');
+  
+  try {
+    const config = await getPayFastConfig();
+    const testUserId = 'test-user-123';
+    const testEmail = 'test@emergitag.me';
+    const testAmount = 149.00;
+    
+    console.log('Creating signup params with actual credentials...');
+    const params = await createPayFastSignupParams(testUserId, testEmail, testAmount);
+    
+    console.log('Generated parameters:', Object.keys(params));
+    
+    // Generate signature with actual passphrase
+    const passphrase = config.passphrase || '';
+    console.log('Using passphrase:', passphrase ? 'present' : 'empty');
+    
+    const signature = generatePayFastSignature(params, passphrase);
+    console.log('Generated signature for actual credentials:', signature);
+    
+    // Build test URL parameters for comparison
+    const allParams = { ...params, signature };
+    
+    return {
+      success: true,
+      params: allParams,
+      signature,
+      passphrase: passphrase ? 'present' : 'empty',
+      environment: config.environment
+    };
+    
+  } catch (error) {
+    console.error('Failed to test actual credentials:', error);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}

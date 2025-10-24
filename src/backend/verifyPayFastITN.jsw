@@ -1,0 +1,125 @@
+// backend/verifyPayFastITN.jsw
+
+import CryptoJS from 'crypto-js';
+import { getSecret } from 'wix-secrets-backend';
+
+/**
+ * Generates the PayFast signature for **INBOUND ITN VERIFICATION**.
+ * This function sorts the received parameters alphabetically.
+ *
+ * @param {Object} itnData - The ITN data object received from PayFast (parsed from raw body).
+ * The 'signature' and 'passphrase' fields should already be removed from this object.
+ * @param {string} [passphrase] - The optional passphrase for the PayFast account.
+ * @returns {Promise<string>} The generated signature.
+ */
+async function generateItnSignature(itnData, passphrase) {
+  let signatureParts = [];
+  const preparedParams = {}; // To log what's actually being processed
+
+  // For ITN verification, PayFast requires parameters to be sorted alphabetically by key.
+  const itnKeys = Object.keys(itnData).sort();
+
+  for (const key of itnKeys) {
+    let value = itnData[key];
+    if (value === null || value === undefined) {
+      value = "";
+    } else {
+      value = String(value);
+    }
+
+    if (value !== "") {
+      const encodedValue = encodeURIComponent(value.trim()).replace(/%20/g, "+");
+      signatureParts.push(`${key}=${encodedValue}`);
+      preparedParams[key] = value; // Store for logging
+    }
+  }
+
+  console.log("📝 ITN Params for Signature Calculation (alphabetical order):", preparedParams);
+
+  let signatureBaseString = signatureParts.join("&");
+
+  // Append passphrase last, if provided and not empty
+  if (passphrase && passphrase.trim() !== '') {
+    signatureBaseString += `&passphrase=${encodeURIComponent(passphrase.trim()).replace(/%20/g, "+")}`;
+  }
+
+  // Append merchant key last (this is for ITN verification, always append merchant_key after passphrase)
+  const merchantKey = await getSecret("payfastMerchantKey");
+  if (!merchantKey) {
+      throw new Error("PayFast Merchant Key not found in Secrets Manager for ITN signature generation.");
+  }
+  signatureBaseString += `&merchant_key=${merchantKey}`;
+
+
+  console.log("📜 ITN Signature Base String (for MD5):", signatureBaseString);
+
+  const hash = CryptoJS.MD5(signatureBaseString);
+  const signature = hash.toString(CryptoJS.enc.Hex);
+  console.log("🔐 Generated ITN Signature:", signature);
+
+  return signature;
+}
+
+/**
+ * Verifies an Instant Transaction Notification (ITN) from PayFast.
+ * Call this function from your HTTP function that receives ITNs.
+ *
+ * @param {Object} itnData The parsed ITN data (e.g., from request.body).
+ * @param {string} receivedSignature The 'signature' field from the ITN data.
+ * @returns {Promise<boolean>} True if the signature is valid, false otherwise.
+ */
+export async function verifyPayFastITN(itnData, receivedSignature) {
+    try {
+        const passphrase = await getSecret("payfastPassphrase");
+        
+        // Create a copy of the ITN data and remove the signature field before generating
+        // as the 'signature' field itself is not part of the signature generation string.
+        // Also remove 'passphrase' if it somehow got included in the raw ITN data
+        const dataForSignature = { ...itnData };
+        delete dataForSignature.signature;
+        delete dataForSignature.passphrase; // Ensure passphrase is not part of data for hashing
+        
+        const generatedSignature = await generateItnSignature(dataForSignature, passphrase);
+        
+        if (generatedSignature.toLowerCase() === receivedSignature.toLowerCase()) {
+            console.log("✅ PayFast ITN Signature Verified Successfully.");
+            return true;
+        } else {
+            console.warn(`❌ PayFast ITN Signature Mismatch! Received: ${receivedSignature}, Generated: ${generatedSignature}`);
+            return false;
+        }
+    } catch (error) {
+        console.error("❌ Error verifying PayFast ITN:", error);
+        return false;
+    }
+}/*********
+ .jsw file
+ *********
+
+ Backend .jsw files contain functions that run on the server side but can be called from page code and frontend files.
+ Use backend functions to keep code private and hidden from a user's browser. More info:
+
+ https://support.wix.com/en/article/velo-web-modules-calling-backend-code-from-the-frontend
+
+**********/
+
+/*** Call the sample multiply function below by copying the following into your page code:
+
+ import { multiply } from 'backend/multiplication';
+
+ $w.onReady(function () {
+     multiply(4, 5).then(product => {
+         console.log(product);
+     })
+     .catch(error => {
+         console.log(error);
+     });
+ });
+
+***/
+
+// Sample backend code in a multiplication.jsw file:
+
+export function multiply(factor1, factor2) {
+   return factor1 * factor2;
+}

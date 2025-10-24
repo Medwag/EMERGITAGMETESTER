@@ -1,0 +1,194 @@
+// Complete PayFast Integration Test - Try Again
+// This will test the entire PayFast flow with the updated signature generation
+
+import { generatePayFastUrl } from 'backend/payfastUrl.jsw';
+import { runCompletePayFastTest } from 'backend/payfast-complete-test.jsw';
+import { generatePayFastSignature, createPayFastSignupParams } from 'backend/payfastUtils.jsw';
+
+export async function testPayFastTryAgain() {
+  console.log('🚀 PAYFAST "TRY AGAIN" COMPREHENSIVE TEST');
+  console.log('=========================================');
+  
+  const results = {
+    timestamp: new Date().toISOString(),
+    tests: [],
+    overallStatus: 'unknown',
+    issues: []
+  };
+
+  try {
+    // Test 1: Signature Generation with Real Data
+    console.log('\n📋 TEST 1: Signature Generation with Real Parameters');
+    console.log('---------------------------------------------------');
+    
+    const testUserId = 'test-user-' + Date.now();
+    const testEmail = 'test@emergitag.me';
+    const testAmount = 149.00;
+    
+    const signatureTest = await testSignatureGeneration(testUserId, testEmail, testAmount);
+    results.tests.push({
+      name: 'Signature Generation',
+      status: signatureTest.success ? 'PASS' : 'FAIL',
+      details: signatureTest
+    });
+
+    // Test 2: Full URL Generation
+    console.log('\n📋 TEST 2: Complete PayFast URL Generation');
+    console.log('------------------------------------------');
+    
+    const urlTest = await generatePayFastUrl(testUserId, testAmount);
+    results.tests.push({
+      name: 'URL Generation',
+      status: urlTest.success ? 'PASS' : 'FAIL',
+      details: {
+        success: urlTest.success,
+        hasUrl: !!urlTest.redirectUrl,
+        urlLength: urlTest.redirectUrl ? urlTest.redirectUrl.length : 0,
+        hasPromiseError: urlTest.redirectUrl ? urlTest.redirectUrl.includes('[object Promise]') : false,
+        error: urlTest.error,
+        gateway: urlTest.gateway
+      }
+    });
+
+    if (urlTest.success && urlTest.redirectUrl) {
+      console.log('✅ URL generated successfully');
+      console.log('URL length:', urlTest.redirectUrl.length);
+      
+      // Check for common issues
+      if (urlTest.redirectUrl.includes('[object Promise]')) {
+        console.log('❌ WARNING: URL contains [object Promise]');
+        results.issues.push('URL contains unresolved promises');
+      } else {
+        console.log('✅ No promise issues in URL');
+      }
+      
+      // Extract and validate signature from URL
+      const urlParams = new URLSearchParams(urlTest.redirectUrl.split('?')[1]);
+      const urlSignature = urlParams.get('signature');
+      
+      if (urlSignature) {
+        console.log('✅ Signature found in URL:', urlSignature.substring(0, 8) + '...');
+      } else {
+        console.log('❌ No signature found in URL');
+        results.issues.push('No signature in generated URL');
+      }
+      
+    } else {
+      console.log('❌ URL generation failed:', urlTest.error);
+      results.issues.push(`URL generation failed: ${urlTest.error}`);
+    }
+
+    // Test 3: Run Complete Test Suite
+    console.log('\n📋 TEST 3: Complete PayFast Test Suite');
+    console.log('--------------------------------------');
+    
+    const completeTest = await runCompletePayFastTest();
+    results.tests.push({
+      name: 'Complete Test Suite',
+      status: completeTest.overallStatus === 'ALL_TESTS_PASSED' ? 'PASS' : 'PARTIAL',
+      details: {
+        overallStatus: completeTest.overallStatus,
+        testsRun: completeTest.tests.length,
+        recommendations: completeTest.recommendations
+      }
+    });
+
+    // Analyze results
+    const failedTests = results.tests.filter(test => test.status === 'FAIL');
+    const passedTests = results.tests.filter(test => test.status === 'PASS');
+    
+    if (failedTests.length === 0) {
+      results.overallStatus = 'ALL_TESTS_PASSED';
+      console.log('\n🎉 ALL TESTS PASSED!');
+      console.log('✅ PayFast signature generation is working');
+      console.log('✅ URL generation is working');
+      console.log('✅ Integration is ready for production');
+    } else {
+      results.overallStatus = 'SOME_ISSUES_FOUND';
+      console.log(`\n⚠️ ${failedTests.length} test(s) failed, ${passedTests.length} passed`);
+      
+      failedTests.forEach(test => {
+        console.log(`❌ ${test.name}: ${test.details.error || 'See details'}`);
+      });
+    }
+
+    // Final recommendations
+    console.log('\n📊 FINAL ASSESSMENT');
+    console.log('===================');
+    
+    if (results.overallStatus === 'ALL_TESTS_PASSED') {
+      console.log('✅ PayFast integration is ready');
+      console.log('✅ Signature generation fixed');
+      console.log('✅ No [object Promise] issues');
+      console.log('✅ Ready for live testing');
+    } else {
+      console.log('⚠️ Some issues remain:');
+      results.issues.forEach((issue, index) => {
+        console.log(`${index + 1}. ${issue}`);
+      });
+    }
+
+  } catch (error) {
+    console.error('❌ Test suite failed:', error);
+    results.overallStatus = 'TEST_ERROR';
+    results.error = error.message;
+    results.issues.push(`Test execution error: ${error.message}`);
+  }
+
+  return results;
+}
+
+async function testSignatureGeneration(userId, email, amount) {
+  try {
+    console.log('Testing signature generation with real parameters...');
+    
+    // Create PayFast parameters using our utility
+    const params = await createPayFastSignupParams(userId, email, amount);
+    console.log('Parameters created:', Object.keys(params));
+    
+    // Generate signature
+    const signature = generatePayFastSignature(params, 'test-passphrase');
+    console.log('Signature generated:', signature ? 'YES' : 'NO');
+    console.log('Signature length:', signature ? signature.length : 0);
+    
+    // Validate signature format (should be 32 char MD5 hex)
+    const isValidFormat = signature && /^[a-f0-9]{32}$/.test(signature);
+    console.log('Valid MD5 format:', isValidFormat ? 'YES' : 'NO');
+    
+    return {
+      success: !!(signature && isValidFormat),
+      signature: signature ? signature.substring(0, 8) + '...' : null,
+      signatureLength: signature ? signature.length : 0,
+      validFormat: isValidFormat,
+      parametersCount: Object.keys(params).length
+    };
+    
+  } catch (error) {
+    console.error('Signature generation test failed:', error);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+
+export async function quickPayFastTest() {
+  console.log('⚡ QUICK PAYFAST TEST');
+  console.log('====================');
+  
+  try {
+    const testUserId = 'quick-test-' + Date.now();
+    const result = await generatePayFastUrl(testUserId, 99.00);
+    
+    console.log('Success:', result.success);
+    console.log('Has URL:', !!result.redirectUrl);
+    console.log('URL Preview:', result.redirectUrl ? result.redirectUrl.substring(0, 100) + '...' : 'None');
+    console.log('Error:', result.error || 'None');
+    
+    return result;
+    
+  } catch (error) {
+    console.error('Quick test failed:', error);
+    return { success: false, error: error.message };
+  }
+}

@@ -1,0 +1,288 @@
+// ✅ backend/subscription-sync-diagnostics.jsw
+// Diagnostic tools for subscription sync issues
+import wixData from 'wix-data';
+import { getPaystackSecretKey } from 'backend/paystack-config.jsw';
+import { fetch } from 'wix-fetch';
+
+/**
+ * Comprehensive subscription sync diagnostic
+ * @param {string} userId - Wix user ID
+ * @returns {Promise<object>} Detailed diagnostic report
+ */
+export async function diagnoseSubscriptionSync(userId) {
+    const diagnostic = {
+        userId: userId,
+        timestamp: new Date(),
+        cms: {},
+        paystack: {},
+        issues: [],
+        recommendations: []
+    };
+
+    try {
+        // 1. Check CMS Profile
+        console.log('🔍 Checking CMS profile...');
+        const profileQuery = await wixData.query('Emergency_Profiles')
+            .eq('_owner', userId)
+            .limit(1)
+            .find({ suppressAuth: true });
+
+        if (profileQuery.items.length === 0) {
+            diagnostic.issues.push('No Emergency_Profiles found for user');
+            diagnostic.recommendations.push('Create user profile first');
+            return diagnostic;
+        }
+
+        const profile = profileQuery.items[0];
+        diagnostic.cms = {
+            profileId: profile._id,
+            subscriptionActive: profile.subscriptionActive,
+            paystackSubscriptionCode: profile.paystackSubscriptionCode,
+            subscriptionId: profile.subscriptionId,
+            membershipTier: profile.membershipTier,
+            planStatus: profile.planStatus,
+            signUpPaid: profile.signUpPaid,
+            emailAddress: profile.emailAddress || profile.email,
+            customer_code: profile.customer_code
+        };
+
+        // 2. Check Paystack if subscription code exists
+        if (profile.paystackSubscriptionCode || profile.subscriptionId) {
+            const subscriptionCode = profile.paystackSubscriptionCode || profile.subscriptionId;
+            console.log('🔍 Checking Paystack subscription:', subscriptionCode);
+            
+            try {
+                const secretKey = await getPaystackSecretKey();
+                const response = await fetch(`https://api.paystack.co/subscription/${subscriptionCode}`, {
+                    method: 'GET',
+                    headers: { 'Authorization': `Bearer ${secretKey}` }
+                });
+
+                const result = await response.json();
+                if (response.ok && result.status) {
+                    diagnostic.paystack.subscription = {
+                        status: result.data.status,
+                        plan: result.data.plan?.name,
+                        customer: result.data.customer?.email,
+                        next_payment_date: result.data.next_payment_date,
+                        subscription_code: result.data.subscription_code
+                    };
+                } else {
+                    diagnostic.paystack.error = result.message || 'Subscription not found';
+                }
+            } catch (paystackError) {
+                diagnostic.paystack.error = paystackError.message;
+            }
+        } else {
+            diagnostic.issues.push('No Paystack subscription code in profile');
+        }
+
+        // 3. Check Paystack customer if email exists
+        if (profile.emailAddress || profile.email) {
+            const email = profile.emailAddress || profile.email;
+            console.log('🔍 Checking Paystack customer for email:', email);
+            
+            try {
+                const secretKey = await getPaystackSecretKey();
+                const response = await fetch(`https://api.paystack.co/customer?email=${encodeURIComponent(email)}`, {
+                    method: 'GET',
+                    headers: { 'Authorization': `Bearer ${secretKey}` }
+                });
+
+                const result = await response.json();
+                if (response.ok && result.status && result.data.length > 0) {
+                    diagnostic.paystack.customer = {
+                        customer_code: result.data[0].customer_code,
+                        email: result.data[0].email,
+                        subscriptions_count: result.data[0].subscriptions?.length || 0
+                    };
+                } else {
+                    diagnostic.paystack.customerError = 'Customer not found in Paystack';
+                }
+            } catch (customerError) {
+                diagnostic.paystack.customerError = customerError.message;
+            }
+        }
+
+        // 4. Analyze issues and provide recommendations
+        diagnostic.issues = [];
+        diagnostic.recommendations = [];
+
+        if (diagnostic.cms.subscriptionActive && !diagnostic.paystack.subscription) {
+            diagnostic.issues.push('CMS shows active subscription but no valid Paystack subscription found');
+            diagnostic.recommendations.push('Run subscription recovery to sync with Paystack');
+        }
+
+        if (diagnostic.paystack.subscription && diagnostic.paystack.subscription.status !== 'active') {
+            diagnostic.issues.push(`Paystack subscription status is '${diagnostic.paystack.subscription.status}', not 'active'`);
+            diagnostic.recommendations.push('Check payment method and subscription status in Paystack');
+        }
+
+        if (!diagnostic.cms.paystackSubscriptionCode && !diagnostic.cms.subscriptionId) {
+            diagnostic.issues.push('Missing Paystack subscription code in CMS profile');
+            diagnostic.recommendations.push('Recover subscription code from Paystack');
+        }
+
+        if (diagnostic.paystack.customer && diagnostic.paystack.customer.subscriptions_count > 0 && !diagnostic.paystack.subscription) {
+            diagnostic.issues.push('Customer has subscriptions in Paystack but subscription code in CMS is incorrect');
+            diagnostic.recommendations.push('Update subscription code in CMS to match active Paystack subscription');
+        }
+
+        // 5. Overall health assessment
+        const hasActiveSubscription = diagnostic.paystack.subscription?.status === 'active';
+        const cmsInSync = diagnostic.cms.subscriptionActive === hasActiveSubscription;
+        
+        diagnostic.overall = {
+            healthy: hasActiveSubscription && cmsInSync,
+            hasPaystackSubscription: !!diagnostic.paystack.subscription,
+            paystackActive: hasActiveSubscription,
+            cmsActive: diagnostic.cms.subscriptionActive,
+            inSync: cmsInSync
+        };
+
+        return diagnostic;
+
+    } catch (error) {
+        diagnostic.error = error.message;
+        diagnostic.issues.push(`Diagnostic failed: ${error.message}`);
+        return diagnostic;
+    }
+}
+
+/**
+ * Auto-fix subscription sync issues
+ * @param {string} userId - Wix user ID
+ * @returns {Promise<object>} Fix results
+ */
+export async function autoFixSubscriptionSync(userId) {
+    try {
+        console.log('🔧 Starting auto-fix for subscription sync...');
+        
+        const diagnostic = await diagnoseSubscriptionSync(userId);
+        const fixes = [];
+        let success = true;
+
+        // Fix 1: If CMS active but no Paystack subscription, try recovery
+        if (diagnostic.cms.subscriptionActive && !diagnostic.paystack.subscription) {
+            console.log('🔧 Attempting subscription recovery...');
+            try {
+                const { recoverAndSyncPaystack } = await import('backend/paystackRecoveryAndSync.jsw');
+                const recoveryResult = await recoverAndSyncPaystack(userId);
+                
+                if (recoveryResult.status === 'ok') {
+                    fixes.push('✅ Successfully recovered subscription from Paystack');
+                } else {
+                    fixes.push('❌ Subscription recovery failed: ' + recoveryResult.message);
+                    success = false;
+                }
+            } catch (recoveryError) {
+                fixes.push('❌ Recovery error: ' + recoveryError.message);
+                success = false;
+            }
+        }
+
+        // Fix 2: If Paystack inactive but CMS active, update CMS
+        if (diagnostic.paystack.subscription && diagnostic.paystack.subscription.status !== 'active' && diagnostic.cms.subscriptionActive) {
+            console.log('🔧 Updating CMS to reflect inactive Paystack subscription...');
+            try {
+                await wixData.update('Emergency_Profiles', {
+                    _id: diagnostic.cms.profileId,
+                    subscriptionActive: false,
+                    planStatus: diagnostic.paystack.subscription.status
+                }, { suppressAuth: true });
+                fixes.push('✅ Updated CMS to match inactive Paystack subscription');
+            } catch (updateError) {
+                fixes.push('❌ Failed to update CMS: ' + updateError.message);
+                success = false;
+            }
+        }
+
+        // Fix 3: If Paystack active but CMS inactive, update CMS
+        if (diagnostic.paystack.subscription && diagnostic.paystack.subscription.status === 'active' && !diagnostic.cms.subscriptionActive) {
+            console.log('🔧 Updating CMS to reflect active Paystack subscription...');
+            try {
+                await wixData.update('Emergency_Profiles', {
+                    _id: diagnostic.cms.profileId,
+                    subscriptionActive: true,
+                    planStatus: 'active',
+                    membershipTier: diagnostic.paystack.subscription.plan
+                }, { suppressAuth: true });
+                fixes.push('✅ Updated CMS to match active Paystack subscription');
+            } catch (updateError) {
+                fixes.push('❌ Failed to update CMS: ' + updateError.message);
+                success = false;
+            }
+        }
+
+        return {
+            success: success,
+            fixes: fixes,
+            diagnostic: diagnostic,
+            message: success ? 'Auto-fix completed successfully' : 'Some fixes failed'
+        };
+
+    } catch (error) {
+        return {
+            success: false,
+            error: error.message,
+            fixes: [],
+            message: 'Auto-fix failed'
+        };
+    }
+}
+
+/**
+ * Get user-friendly sync status
+ * @param {string} userId - Wix user ID  
+ * @returns {Promise<object>} Simple status report
+ */
+export async function getSubscriptionSyncStatus(userId) {
+    try {
+        const diagnostic = await diagnoseSubscriptionSync(userId);
+        
+        let status = 'unknown';
+        let message = '';
+        let action = '';
+
+        if (diagnostic.overall.healthy) {
+            status = 'healthy';
+            message = 'Subscription is active and properly synced';
+            action = 'none';
+        } else if (diagnostic.overall.hasPaystackSubscription && diagnostic.overall.paystackActive && !diagnostic.overall.cmsActive) {
+            status = 'cms_outdated';
+            message = 'You have an active Paystack subscription but dashboard needs updating';
+            action = 'refresh_cms';
+        } else if (diagnostic.overall.cmsActive && !diagnostic.overall.hasPaystackSubscription) {
+            status = 'paystack_missing';
+            message = 'Dashboard shows active subscription but Paystack subscription not found';
+            action = 'recover_subscription';
+        } else if (!diagnostic.overall.hasPaystackSubscription && !diagnostic.overall.cmsActive) {
+            status = 'no_subscription';
+            message = 'No active subscription found';
+            action = 'subscribe';
+        } else {
+            status = 'sync_issue';
+            message = 'Subscription sync issue detected';
+            action = 'contact_support';
+        }
+
+        return {
+            status: status,
+            message: message,
+            action: action,
+            details: {
+                cmsActive: diagnostic.overall.cmsActive,
+                paystackActive: diagnostic.overall.paystackActive,
+                inSync: diagnostic.overall.inSync
+            }
+        };
+
+    } catch (error) {
+        return {
+            status: 'error',
+            message: 'Unable to check subscription status',
+            action: 'contact_support',
+            error: error.message
+        };
+    }
+}

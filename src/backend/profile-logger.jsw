@@ -1,0 +1,92 @@
+import wixData from 'wix-data';
+import wixUsersBackend from 'wix-users-backend';
+
+
+// === Append-only backup + audit logger ===
+export async function logProfileChange(profile, action = "update", reason = "auto") {
+    if (!profile || !profile._id) {
+        console.warn("⚠️ logProfileChange called with invalid profile:", profile);
+        return;
+    }
+
+    const profileId = profile._id;
+    const user = wixUsersBackend.currentUser;
+    const userId = user?.id || "system";
+
+    // Check for recent backups to prevent spamming (within last 5 minutes)
+    try {
+        const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
+        const recentBackups = await wixData.query("Emergency_Profiles_Backup")
+            .eq("originalProfileId", profileId)
+            .gt("backupTimestamp", fiveMinutesAgo)
+            .limit(1)
+            .find({ suppressAuth: true });
+        
+        if (recentBackups.items.length > 0) {
+            console.log(`⏳ Skipping backup for profile ${profileId} - recent backup exists`);
+            return; // Skip backup if one was created recently
+        }
+    } catch (checkErr) {
+        console.warn('Could not check for recent backups, proceeding:', checkErr.message);
+    }
+
+    // --- 1. Write Snapshot to Backup ---
+    // Remove _id to prevent duplicate key errors
+    const { _id, ...profileDataWithoutId } = profile;
+    const backupEntry = {
+        ...profileDataWithoutId,
+        originalProfileId: profileId,  // Store original ID separately
+        profileId,
+        backupTimestamp: new Date(),
+        backupReason: reason
+    };
+    
+    try {
+        await wixData.insert("Emergency_Profiles_Backup", backupEntry);
+        console.log(`✅ Backup saved for profile ${profileId}`);
+    } catch (err) {
+        console.error("❌ Backup insert failed:", err);
+        // Don't throw - backup failure shouldn't break main operations
+    }
+
+    // --- 2. Append Audit Entry ---
+    const auditEntry = {
+        profileId,
+        action,
+        changedBy: userId,
+        timestamp: new Date(),
+        dataSnapshot: JSON.stringify(profile, null, 2)
+    };
+    try {
+        await wixData.insert("Emergency_Profiles_Audit", auditEntry);
+        console.log(`📜 Audit log written for profile ${profileId} (${action})`);
+    } catch (err) {
+        console.error("❌ Audit log insert failed:", err);
+    }
+}
+
+// === Insert profile (main collection + backup + audit) ===
+export async function insertProfile(profile) {
+    if (!profile) throw new Error("Profile data required for insert");
+
+    // Insert into main collection
+    const saved = await wixData.insert("Emergency_Profiles", profile);
+
+    // Backup + Audit
+    await logProfileChange(saved, "insert", "initial insert");
+
+    return saved;
+}
+
+// === Update profile (main collection + backup + audit) ===
+export async function updateProfile(profile) {
+    if (!profile || !profile._id) throw new Error("Profile _id required for update");
+
+    // Update main collection
+    const saved = await wixData.update("Emergency_Profiles", profile);
+
+    // Backup + Audit
+    await logProfileChange(saved, "update", "user submitted data");
+
+    return saved;
+}

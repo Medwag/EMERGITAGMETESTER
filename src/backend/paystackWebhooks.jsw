@@ -1,0 +1,75 @@
+// backend/paystackWebhook.jsw
+
+import { ok, badRequest } from 'wix-http-functions';
+import { sendDiscordAlert } from 'backend/discord.jsw'; // <-- make sure this exists
+import { getSecret } from 'wix-secrets-backend';
+
+// Safe crypto import - only load when needed
+let crypto = null;
+async function getCrypto() {
+    if (!crypto) {
+        try {
+            crypto = await import('crypto');
+            return crypto;
+        } catch (err) {
+            console.warn('Crypto module not available, webhook signature verification disabled:', err.message);
+            return null;
+        }
+    }
+    return crypto;
+}
+
+// --- Webhook endpoint: https://yourdomain.com/_functions/paystackWebhook
+export async function post_paystackWebhook(request) {
+    try {
+        const body = await request.body.text();
+        const jsonBody = JSON.parse(body);
+
+        // ✅ Verify signature
+        const secret = await getSecret("paystack"); // your Paystack secret key
+        const signature = request.headers["x-paystack-signature"];
+
+        const isValidSignature = await verifySignature(secret, body, signature);
+        if (!signature || !isValidSignature) {
+            await sendDiscordAlert("❌ Invalid Paystack signature detected.");
+            return badRequest({ body: "Invalid signature" });
+        }
+
+        // ✅ Process event
+        const event = jsonBody?.event || "unknown_event";
+        const email = jsonBody?.data?.customer?.email || "no-email";
+        const plan = jsonBody?.data?.plan?.name || "no-plan";
+        const status = jsonBody?.data?.status || "no-status";
+
+        const message = `🔔 Paystack Event: **${event}**\n👤 Email: ${email}\n📦 Plan: ${plan}\n📊 Status: ${status}`;
+        await sendDiscordAlert(message);
+
+        // Optional: handle subscription success etc. here
+
+        return ok({ body: "Webhook received" });
+
+    } catch (err) {
+        await sendDiscordAlert("🔥 Webhook error: " + err.message);
+        return badRequest({ body: "Error" });
+    }
+}
+
+// --- Verify Paystack signature
+async function verifySignature(secret, rawBody, signature) {
+    try {
+        const cryptoModule = await getCrypto();
+        if (!cryptoModule) {
+            console.error('❌ Crypto module not available, rejecting webhook for security');
+            throw new Error('Crypto module required for signature verification');
+        }
+        
+        const hash = cryptoModule
+            .createHmac("sha512", secret)
+            .update(rawBody)
+            .digest("hex");
+        return hash === signature;
+    } catch (e) {
+        console.error('❌ Signature verification failed:', e.message);
+        return false;
+    }
+}

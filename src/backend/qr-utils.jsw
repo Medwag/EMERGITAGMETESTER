@@ -1,0 +1,4 @@
+// backend/qr-utils.jsw
+export function generateCustomQR(url) {
+  return `https://quickchart.io/qr?text=${encodeURIComponent(url)}&size=300&dark=#FFFFFF&light=#FF0000&centerImageUrl=https://upload.wikimedia.org/wikipedia/commons/thumb/e/e7/Ei-blue-cross.svg/120px-Ei-blue-cross.svg.png`;
+}

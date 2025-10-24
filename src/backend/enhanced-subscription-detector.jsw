@@ -1,0 +1,495 @@
+// backend/enhanced-subscription-detector.jsw
+// Enhanced subscription detection utility for consistent results across all pages
+
+import { getPaystackSecretKey, PAYSTACK_CONFIG } from './paystack-config.jsw';
+import { detectSignupPayment } from 'backend/signup-payment-detector-dual.jsw';
+import { fetch } from 'wix-fetch';
+import wixData from 'wix-data';
+
+/**
+ * Enhanced subscription detection for dashboard and signup pages
+ * Uses the same successful methods from comprehensive diagnostic
+ */
+export async function detectUserSubscriptions(email, userId = null) {
+    console.log(`🔍 ENHANCED SUBSCRIPTION DETECTION: Starting for email: ${email}, userId: ${userId}`);
+    
+    const detection = {
+        timestamp: new Date().toISOString(),
+        email: email,
+        userId: userId,
+        subscriptions_found: [],
+        active_subscription: null,
+        signup_payment_status: null,
+        customer_data: null,
+        cms_profile: null,
+        plan_assignment: null,
+        success: false,
+        error: null
+    };
+    
+    try {
+        const secretKey = await getPaystackSecretKey();
+        if (!secretKey) {
+            throw new Error("Paystack secret key not configured");
+        }
+        
+        console.log(`🔑 Using secret key: ${secretKey.substring(0, 15)}...`);
+        
+        // ===========================================
+        // 1. FIND ALL SUBSCRIPTIONS (SUCCESSFUL METHOD)
+        // ===========================================
+        console.log(`📋 STEP 1: Finding subscriptions using successful method...`);
+        detection.subscriptions_found = await findSubscriptionsByEmail(email, secretKey);
+        
+        if (detection.subscriptions_found.length === 0) {
+            console.log('❌ No subscriptions found');
+            detection.error = 'No subscriptions found';
+            return detection;
+        }
+        
+        console.log(`✅ Found ${detection.subscriptions_found.length} subscription(s)`);
+        
+        // ===========================================
+        // 2. SELECT BEST SUBSCRIPTION
+        // ===========================================
+        console.log(`📋 STEP 2: Selecting best subscription...`);
+        detection.active_subscription = selectBestSubscription(detection.subscriptions_found);
+        
+        // Check if we have a valid subscription before proceeding
+        if (!detection.active_subscription) {
+            console.log(`❌ No valid subscription found for ${email}`);
+            return {
+                success: false,
+                data: null,
+                message: 'No subscriptions found',
+                error: 'No valid subscription found'
+            };
+        }
+        
+        // ===========================================
+        // 3. CHECK SIGNUP PAYMENT STATUS (DUAL GATEWAY)
+        // ===========================================
+        console.log(`💳 STEP 3: Checking signup payment status (both gateways)...`);
+        if (userId) {
+            try {
+                detection.signup_payment_status = await detectSignupPayment(userId, {
+                    includePartialMatches: true,
+                    timeWindow: 90 // Extended window for signup payments
+                });
+                console.log(`💳 Signup payment detection result:`, {
+                    detected: detection.signup_payment_status?.paymentDetected || false,
+                    provider: detection.signup_payment_status?.provider || 'none',
+                    confidence: detection.signup_payment_status?.confidence || 0
+                });
+            } catch (signupError) {
+                console.warn(`⚠️ Signup payment detection failed:`, signupError);
+                detection.signup_payment_status = { 
+                    paymentDetected: false, 
+                    error: signupError.message 
+                };
+            }
+        } else {
+            console.log(`⚠️ No userId provided, skipping signup payment detection`);
+            detection.signup_payment_status = { 
+                paymentDetected: false, 
+                reason: 'No userId provided' 
+            };
+        }
+        
+        // ===========================================
+        // 4. EXTRACT CUSTOMER DATA
+        // ===========================================
+        console.log(`👤 STEP 4: Extracting customer data...`);
+        detection.customer_data = detection.active_subscription?.customer || {};
+        
+        // ===========================================
+        // 5. GET/UPDATE CMS PROFILE
+        // ===========================================
+        console.log(`🗄️ STEP 5: Processing CMS profile...`);
+        detection.cms_profile = await processUserProfile(
+            email, 
+            userId, 
+            detection.customer_data, 
+            detection.active_subscription,
+            detection.signup_payment_status
+        );
+        
+        // ===========================================
+        // 6. DETERMINE PLAN ASSIGNMENT
+        // ===========================================
+        console.log(`🎯 STEP 6: Determining plan assignment...`);
+        detection.plan_assignment = determinePlanAssignment(
+            detection.active_subscription,
+            detection.signup_payment_status
+        );
+        
+        detection.success = true;
+        console.log(`✅ SUBSCRIPTION DETECTION COMPLETE`);
+        
+        return detection;
+        
+    } catch (error) {
+        console.error(`❌ SUBSCRIPTION DETECTION FAILED:`, error);
+        detection.error = error.message;
+        return detection;
+    }
+}
+
+/**
+ * Find subscriptions using the successful "all subscriptions" method
+ */
+async function findSubscriptionsByEmail(email, secretKey) {
+    console.log(`🔍 Finding subscriptions for email: ${email}`);
+    
+    try {
+        // Use the successful method from comprehensive diagnostic
+        const allSubsURL = `${PAYSTACK_CONFIG.API_BASE_URL}/subscription?perPage=100`;
+        console.log(`📡 API URL: ${allSubsURL}`);
+        
+        const response = await fetch(allSubsURL, {
+            method: 'GET',
+            headers: {
+                'Authorization': `Bearer ${secretKey}`,
+                'Content-Type': 'application/json'
+            }
+        });
+
+        if (!response.ok) {
+            throw new Error(`API request failed: ${response.status}`);
+        }
+
+        const data = await response.json();
+        console.log(`📊 API Response: ${data.data?.length || 0} total subscriptions`);
+
+        if (!data.status || !data.data?.length) {
+            console.log('❌ No subscriptions in API response');
+            return [];
+        }
+
+        // Filter by email (case insensitive)
+        const matchingSubscriptions = data.data.filter(sub => 
+            sub.customer?.email?.toLowerCase() === email.toLowerCase()
+        );
+
+        console.log(`✅ Found ${matchingSubscriptions.length} matching subscription(s)`);
+        
+        // Log each found subscription
+        matchingSubscriptions.forEach((sub, index) => {
+            console.log(`📋 Subscription ${index + 1}:`, {
+                subscription_code: sub.subscription_code,
+                status: sub.status,
+                plan_name: sub.plan?.name,
+                amount: sub.amount,
+                customer_email: sub.customer?.email,
+                created_at: sub.created_at
+            });
+        });
+
+        return matchingSubscriptions;
+        
+    } catch (error) {
+        console.error(`❌ Error finding subscriptions:`, error);
+        return [];
+    }
+}
+
+/**
+ * Select the best subscription from found subscriptions
+ */
+function selectBestSubscription(subscriptions) {
+    console.log(`🎯 Selecting best subscription from ${subscriptions.length} options`);
+    
+    // Check if we have any subscriptions
+    if (!subscriptions || subscriptions.length === 0) {
+        console.log(`❌ No subscriptions provided to select from`);
+        return null;
+    }
+    
+    // Priority: Active subscription > Most recent > Any subscription
+    const activeSubscriptions = subscriptions.filter(sub => sub.status === 'active');
+    console.log(`🟢 Active subscriptions: ${activeSubscriptions.length}`);
+    
+    let selectedSub = null;
+    
+    if (activeSubscriptions.length > 0) {
+        // Use the most recent active subscription
+        selectedSub = activeSubscriptions.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
+        console.log(`✅ Selected ACTIVE subscription: ${selectedSub.subscription_code} (${selectedSub?.plan?.name || 'Unknown Plan'})`);
+    } else {
+        // Use the most recent subscription regardless of status
+        selectedSub = subscriptions.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
+        console.log(`⚠️ Selected most recent subscription (${selectedSub?.status || 'Unknown Status'}): ${selectedSub?.subscription_code || 'Unknown Code'}`);
+    }
+    
+    return selectedSub;
+}
+
+/**
+ * Process user profile in CMS
+ */
+async function processUserProfile(email, userId, customerData, subscription, signupPaymentStatus = null) {
+    console.log(`🗄️ Processing user profile for email: ${email}, userId: ${userId}`);
+    
+    try {
+        // Try to find profile by multiple methods
+        let profile = null;
+        
+        // Method 1: By userId if provided
+        if (userId) {
+            const userIdQuery = await wixData.query("Emergency_Profiles")
+                .eq("_owner", userId)
+                .limit(1)
+                .find({ suppressAuth: true });
+                
+            if (userIdQuery.items.length > 0) {
+                profile = userIdQuery.items[0];
+                console.log(`✅ Found profile by userId: ${profile._id}`);
+            }
+        }
+        
+        // Method 2: By email if no profile found
+        if (!profile) {
+            const emailQuery = await wixData.query("Emergency_Profiles")
+                .eq("emailAddress", email)
+                .limit(1)
+                .find({ suppressAuth: true });
+                
+            if (emailQuery.items.length > 0) {
+                profile = emailQuery.items[0];
+                console.log(`✅ Found profile by email: ${profile._id}`);
+            }
+        }
+        
+        // Update or create profile with subscription and signup payment data
+        if (profile) {
+            console.log(`🔄 Updating existing profile with subscription and payment data`);
+            profile = await updateProfileWithSubscription(profile, customerData, subscription, signupPaymentStatus);
+        } else {
+            console.log(`🆕 Creating new profile with subscription and payment data`);
+            profile = await createProfileWithSubscription(email, userId, customerData, subscription, signupPaymentStatus);
+        }
+        
+        return profile;
+        
+    } catch (error) {
+        console.error(`❌ Error processing user profile:`, error);
+        return null;
+    }
+}
+
+/**
+ * Update existing profile with subscription and signup payment data
+ */
+async function updateProfileWithSubscription(profile, customerData, subscription, signupPaymentStatus = null) {
+    try {
+        const planAssignment = determinePlanAssignment(subscription, signupPaymentStatus);
+        
+        // Update profile with subscription data
+        profile.subscriptionPaid = subscription?.status === 'active';
+        profile.subscriptionActive = subscription?.status === 'active';
+        profile.planStatus = subscription?.status || 'unknown';
+        profile.membershipTier = planAssignment.tier;
+        profile.paystackSubscriptionCode = subscription?.subscription_code || '';
+        profile.customer_code = customerData?.customer_code || '';
+        
+        // Update signup payment status if detected
+        if (signupPaymentStatus && signupPaymentStatus.paymentDetected && signupPaymentStatus.confidence > 80) {
+            console.log(`💳 Updating profile with detected signup payment (${signupPaymentStatus.provider})`);
+            profile.signUpPaid = true;
+            profile.signUpReference = signupPaymentStatus.paymentReference;
+            profile.paymentProvider = signupPaymentStatus.provider;
+            profile.paymentAmount = parseFloat(signupPaymentStatus.amount || 5.00);
+            profile.paymentDetectionConfidence = signupPaymentStatus.confidence;
+            if (signupPaymentStatus.paymentDate) {
+                profile.joinedDate = new Date(signupPaymentStatus.paymentDate);
+            }
+        } else if (signupPaymentStatus && !signupPaymentStatus.paymentDetected) {
+            console.log(`❌ No signup payment detected for profile update`);
+            // Don't overwrite existing signup payment data if detection failed
+        }
+        
+        // Update customer info if missing
+        if (!profile.firstName && customerData.first_name) {
+            profile.firstName = customerData.first_name;
+        }
+        if (!profile.lastName && customerData.last_name) {
+            profile.lastName = customerData.last_name;
+        }
+        if (!profile.emailAddress) {
+            profile.emailAddress = customerData.email;
+        }
+        
+        profile.lastUpdated = new Date();
+        
+        const updatedProfile = await wixData.update("Emergency_Profiles", profile, { suppressAuth: true });
+        console.log(`✅ Updated profile: ${updatedProfile._id} with plan: ${planAssignment.tier}`);
+        
+        return updatedProfile;
+        
+    } catch (error) {
+        console.error(`❌ Error updating profile:`, error);
+        throw error;
+    }
+}
+
+/**
+ * Create new profile with subscription and signup payment data
+ */
+async function createProfileWithSubscription(email, userId, customerData, subscription, signupPaymentStatus = null) {
+    try {
+        const planAssignment = determinePlanAssignment(subscription, signupPaymentStatus);
+        
+        // Generate safe UUID for public view
+        const publicViewId = Math.random().toString(36).substring(2, 10) + Date.now().toString(36);
+        
+        const profileData = {
+            _owner: userId || customerData.customer_code,
+            userId: userId || customerData.customer_code,
+            emailAddress: email,
+            firstName: customerData.first_name || '',
+            lastName: customerData.last_name || '',
+            subscriptionPaid: subscription?.status === 'active',
+            subscriptionActive: subscription?.status === 'active',
+            planStatus: subscription?.status || 'unknown',
+            membershipTier: planAssignment.tier,
+            paystackSubscriptionCode: subscription?.subscription_code || '',
+            customer_code: customerData?.customer_code || '',
+            publicViewId: publicViewId,
+            dateCreated: new Date(),
+            lastUpdated: new Date()
+        };
+
+        // Add signup payment data if detected with high confidence
+        if (signupPaymentStatus && signupPaymentStatus.paymentDetected && signupPaymentStatus.confidence > 80) {
+            console.log(`💳 Creating profile with detected signup payment (${signupPaymentStatus.provider})`);
+            profileData.signUpPaid = true;
+            profileData.signUpReference = signupPaymentStatus.paymentReference;
+            profileData.paymentProvider = signupPaymentStatus.provider;
+            profileData.paymentAmount = parseFloat(signupPaymentStatus.amount || 5.00);
+            profileData.paymentDetectionConfidence = signupPaymentStatus.confidence;
+            if (signupPaymentStatus.paymentDate) {
+                profileData.joinedDate = new Date(signupPaymentStatus.paymentDate);
+            }
+        } else {
+            console.log(`❌ No high-confidence signup payment for new profile`);
+            profileData.signUpPaid = false;
+        }
+        
+        const newProfile = await wixData.insert("Emergency_Profiles", profileData, { suppressAuth: true });
+        console.log(`✅ Created profile: ${newProfile._id} with plan: ${planAssignment.tier}`);
+        
+        return newProfile;
+        
+    } catch (error) {
+        console.error(`❌ Error creating profile:`, error);
+        throw error;
+    }
+}
+
+/**
+ * Determine plan assignment from subscription and signup payment status
+ */
+function determinePlanAssignment(subscription, signupPaymentStatus = null) {
+    console.log(`🎯 Determining plan assignment for subscription and signup payment`);
+    
+    // Check if we have a subscription
+    const hasActiveSubscription = subscription && subscription.status === 'active';
+    
+    // Check if we have a confirmed signup payment
+    const hasSignupPayment = signupPaymentStatus && 
+                            signupPaymentStatus.paymentDetected && 
+                            signupPaymentStatus.confidence > 70;
+    
+    console.log(`[Plan Assignment] Active subscription: ${hasActiveSubscription}, Signup payment: ${hasSignupPayment}`);
+    
+    if (hasActiveSubscription) {
+        // User has active subscription - highest tier
+        const subscriptionAmount = parseFloat(subscription.amount / 100); // Convert from kobo
+        
+        if (subscriptionAmount >= 500) {
+            return { tier: 'Premium', access: 'full', source: 'active_subscription' };
+        } else if (subscriptionAmount >= 100) {
+            return { tier: 'Standard', access: 'full', source: 'active_subscription' };
+        } else {
+            return { tier: 'Basic', access: 'full', source: 'active_subscription' };
+        }
+        
+    } else if (hasSignupPayment) {
+        // User has confirmed signup payment but no active subscription - basic access
+        console.log(`[Plan Assignment] Signup payment confirmed (${signupPaymentStatus.provider}), granting basic access`);
+        return { 
+            tier: 'Basic', 
+            access: 'basic', 
+            source: `signup_payment_${signupPaymentStatus.provider}`,
+            confidence: signupPaymentStatus.confidence
+        };
+        
+    } else {
+        // No subscription or signup payment - limited access
+        console.log(`[Plan Assignment] No subscription or signup payment confirmed`);
+        return { 
+            tier: 'Free', 
+            access: 'limited', 
+            source: 'none',
+            requiresPayment: true
+        };
+    }
+}
+    
+/*
+    const assignment = {
+        tier: 'Free',
+        confidence: 'low',
+        source: 'default'
+    };
+    
+    // Early return if no subscription provided
+    if (!subscription) {
+        console.log(`❌ No subscription provided, defaulting to Free tier`);
+        return assignment;
+    }
+    
+    // Method 1: From plan name
+    if (subscription?.plan?.name) {
+        const planName = subscription.plan.name.toLowerCase();
+        if (planName.includes('gold')) {
+            assignment.tier = 'Gold';
+            assignment.confidence = 'high';
+            assignment.source = 'plan_name';
+        } else if (planName.includes('silver')) {
+            assignment.tier = 'Silver';
+            assignment.confidence = 'high';
+            assignment.source = 'plan_name';
+        } else if (planName.includes('bronze')) {
+            assignment.tier = 'Bronze';
+            assignment.confidence = 'high';
+            assignment.source = 'plan_name';
+        }
+    }
+    
+    // Method 2: From amount if plan name didn't work
+    if (assignment.confidence === 'low' && subscription?.amount) {
+        const amount = parseInt(subscription.amount) || 0;
+        if (amount >= 50000) { // R500+
+            assignment.tier = 'Gold';
+            assignment.confidence = 'medium';
+            assignment.source = 'amount_inference';
+        } else if (amount >= 25000) { // R250+
+            assignment.tier = 'Silver';
+            assignment.confidence = 'medium';
+            assignment.source = 'amount_inference';
+        } else if (amount >= 10000) { // R100+
+            assignment.tier = 'Bronze';
+            assignment.confidence = 'medium';
+            assignment.source = 'amount_inference';
+        } else if (amount > 0) {
+            assignment.tier = 'Bronze';
+            assignment.confidence = 'low';
+            assignment.source = 'amount_fallback';
+        }
+    }
+    
+    console.log(`🎯 Plan assignment result:`, assignment);
+    return assignment;
+}
+*/

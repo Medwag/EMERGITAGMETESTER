@@ -1,0 +1,254 @@
+// ✅ backend/notify-handler.jsw
+
+import wixData from 'wix-data';
+// ❌ REMOVED: No longer need to getSecret directly here, secrets are passed as params
+// import { getSecret } from 'wix-secrets-backend'; 
+import { generatePayFastSignature } from 'backend/payfastUtils.jsw';
+import { createOrGetEmergencyProfile } from 'backend/profile-utils.jsw';
+import {
+    emailClientSignupPaid,
+    emailClientSubscriptionActive,
+    notifyAdminOfNewProfile,
+    emailClientMembershipConfirmed
+} from 'backend/email-utils.jsw';
+
+// --- GLOBAL CONSTANTS (Copied from http-functions.js for consistency) ---
+/**
+ * Trusted PayFast IP prefixes. ITNs should only be processed from these IPs.
+ * This list should be kept up-to-date with PayFast's official documentation.
+ */
+const TRUSTED_IP_PREFIXES = [
+    "197.97.145.",
+    "41.74.179.",
+    "102.216.36.",
+    "144.126.193.139"
+];
+
+// --- HELPER FUNCTIONS (Copied from http-functions.js for consistency) ---
+/**
+ * Checks if an IP address belongs to a trusted PayFast range.
+ * @param {string} ip - The IP address to check.
+ * @returns {boolean} True if the IP is trusted, false otherwise.
+ */
+function isTrustedIP(ip) {
+    return TRUSTED_IP_PREFIXES.some(prefix => ip.startsWith(prefix));
+}
+
+/**
+ * Logs PayFast IPN data to the "PayFast_Logs" collection.
+ * @param {string} type - Type of payment (e.g., "signup", "subscription", "failed_ip", "failed_signature").
+ * @param {string} ip - IP address from which the ITN was received.
+ * @param {string} rawPayload - Raw payload received from PayFast.
+ * @param {boolean} isTrusted - Whether the IP is trusted.
+ * @param {Object} extra - Additional data to log (e.g., userId, status, tier, cycle).
+*/
+async function logIPN(type, ip, rawPayload, isTrusted, extra = {}) {
+    console.log(`DEBUG: Attempting to log IPN of type '${type}'...`);
+    try {
+        await wixData.insert("PayFast_Logs", {
+            paymentType: type,
+            ipAddress: ip,
+            isTrusted,
+            receivedAt: new Date(),
+            rawPayload: rawPayload,
+            ...extra
+        });
+        console.log(`✅ IPN logged for ${type}:`, extra);
+    } catch (e) {
+        console.error("❌ Failed to log IPN:", e);
+    }
+}
+
+/**
+ * Parses x-www-form-urlencoded string into an object
+ */
+function parseFormUrlEncoded(body) {
+    return body.split('&').reduce((acc, pair) => {
+        const [key, value] = pair.split('=').map(decodeURIComponent);
+        acc[key] = value.replace(/\+/g, ' ');
+        return acc;
+    }, {});
+}
+
+
+/**
+ * Parses, verifies, and processes the PayFast Instant Transaction Notification (ITN).
+ * This function performs IP validation, signature verification, and updates the user's profile.
+ *
+ * @param {string} rawBody - The raw x-www-form-urlencoded body of the ITN request.
+ * @param {object} headers - The headers of the ITN request (used for IP address).
+ * @param {object} payfastSecrets - Object containing PayFast secrets (passphrase, merchantId, merchantKey).
+ * @param {string} payfastSecrets.payfastPassphrase
+ * @param {string} payfastSecrets.payfastMerchantId
+ * @param {string} payfastSecrets.payfastMerchantKey
+ * @returns {Promise<void>}
+ */
+export async function handlePayFastNotification(rawBody, headers, payfastSecrets) { // ✅ NEW: Accept secrets as parameters
+    console.log("🔍 handlePayFastNotification: Raw IPN Body (truncated):", rawBody.substring(0, 200) + "...");
+
+    const ip = headers["x-forwarded-for"] || headers.ip || "unknown";
+    const params = parseFormUrlEncoded(rawBody);
+    console.log("✅ handlePayFastNotification: Parsed PayFast IPN:", params);
+
+    const paymentStatus = params.payment_status;
+    const userId = params.custom_str1;
+    const customStr2 = params.custom_str2; // This holds 'signup' or 'planName'
+    const customStr3 = params.custom_str3; // This holds 'monthly' or 'annual' for subscriptions
+
+    // --- 1. IP Address Validation ---
+    const isLocalTest = params.test_mode === "true" || params.test_mode === "1";
+    const isTrusted = isLocalTest || isTrustedIP(ip);
+
+    if (!isTrusted) {
+        console.warn("⛔ handlePayFastNotification: Untrusted IP for ITN:", ip, ". Refusing to process.");
+        await logIPN("failed_ip", ip, rawBody, false, { userId: userId, status: "REJECTED" });
+        throw new Error("Untrusted IP Address"); // Throw to signify failure to http-functions.js
+    }
+
+    // --- 2. Use Passed Secrets for Signature Verification ---
+    const { payfastPassphrase, payfastMerchantId, payfastMerchantKey } = payfastSecrets; // ✅ NEW: Destructure secrets
+
+    // Basic validation for secrets
+    if (!payfastPassphrase || !payfastMerchantId || !payfastMerchantKey) {
+        console.error("❌ handlePayFastNotification: PayFast secrets not provided to handler.");
+        await logIPN("secrets_missing_in_handler", ip, rawBody, isTrusted, { error: "Secrets not passed to handler" });
+        throw new Error("PayFast secrets not available for verification");
+    }
+
+    // --- 3. ITN Signature Verification ---
+    let isSignatureValid = false;
+    try {
+        // The generatePayFastSignature function expects all parameters, including merchant_key.
+        // It handles sorting and encoding internally.
+        const expectedSignature = await generatePayFastSignature(params, payfastPassphrase);
+        const receivedSignature = params.signature;
+
+        console.log(`DEBUG: Expected Signature: ${expectedSignature}`);
+        console.log(`DEBUG: Received Signature: ${receivedSignature}`);
+
+        isSignatureValid = (expectedSignature.toLowerCase() === receivedSignature.toLowerCase());
+
+        if (!isSignatureValid) {
+            console.error("❌ handlePayFastNotification: PayFast ITN Signature Mismatch!");
+            console.error(`   Calculated: ${expectedSignature}`);
+            console.error(`   Received: ${receivedSignature}`);
+            await logIPN("signature_mismatch_debug", ip, rawBody, isTrusted, {
+                userId: userId,
+                status: paymentStatus,
+                m_payment_id: params.m_payment_id,
+                reason: "Signature Mismatch",
+                calculatedSignature: expectedSignature,
+                receivedSignature: receivedSignature
+            });
+        }
+    } catch (e) {
+        console.error("❌ handlePayFastNotification: Error during signature generation/comparison:", e);
+        await logIPN("signature_error", ip, rawBody, isTrusted, { userId: userId, status: "ERROR", errorMessage: e.message });
+        throw new Error("Signature verification failed");
+    }
+
+    if (!isSignatureValid) {
+        console.error("❌ handlePayFastNotification: ITN verification failed. Invalid signature or data tampering suspected.");
+        await logIPN("failed_signature", ip, rawBody, isTrusted, { userId: userId, status: "REJECTED", reason: "Invalid Signature" });
+        throw new Error("Invalid ITN signature");
+    }
+
+    // --- 4. Payment Status Check ---
+    if (paymentStatus !== "COMPLETE") {
+        console.warn("⚠️ handlePayFastNotification: Payment not complete (or other status):", paymentStatus);
+        await logIPN("non_complete_status", ip, rawBody, isTrusted, {
+            userId: userId,
+            status: paymentStatus,
+            m_payment_id: params.m_payment_id,
+            reason: `ITN Status: ${paymentStatus}`
+        });
+        return; // Do not process further if not COMPLETE
+    }
+
+    // --- 5. Process Payment and Update Profile ---
+    console.log(`✅ handlePayFastNotification: ITN is COMPLETE for user: ${userId}, type: ${customStr2}. Proceeding with profile update.`);
+    try {
+        // Retrieve or create the profile. This function handles the _owner and _id correctly.
+        let profile = await createOrGetEmergencyProfile(userId);
+
+        if (!profile) {
+            console.error("❌ handlePayFastNotification: Failed to retrieve or create profile for userId:", userId, "after successful ITN.");
+            await logIPN("profile_update_failed", ip, rawBody, isTrusted, { userId: userId, status: "ERROR", reason: "Profile not found/created" });
+            throw new Error("Profile update failed after ITN");
+        }
+
+        // Update common profile fields
+        profile.lastUpdated = new Date();
+        profile.status = paymentStatus; // Should be "COMPLETE"
+        profile.paymentId = params.pf_payment_id || "";
+        profile.email = params.email_address || profile.email || "";
+        profile.name = (params.name_first && params.name_last) ? `${params.name_first} ${params.name_last}` : profile.name || "";
+        profile.lastPaymentAmount = params.amount_gross ? parseFloat(params.amount_gross) : (profile.lastPaymentAmount || 0);
+        profile.lastPaymentDate = params.payment_date ? new Date(params.payment_date) : (profile.lastPaymentDate || null);
+
+        // Specific logic based on payment type (custom_str2)
+        if (customStr2 === "signup") {
+            profile.signUpPaid = true;
+            profile.signupDate = profile.signupDate || new Date(); // Set if not already set
+
+            // Ensure subscription fields are reset/cleared for a signup payment
+            profile.subscriptionActive = false;
+            profile.membershipTier = "";
+            profile.subscriptionPlan = "";
+            profile.payfastSubscriptionId = "";
+            profile.nextPaymentDate = null;
+
+            console.log("✅ Profile data prepared for signup payment for", userId);
+            await wixData.update("Emergency_Profiles", profile); // Update the existing profile
+            console.log("🔄 Emergency Profile updated for signup:", userId);
+
+            // Email notifications
+            await emailClientSignupPaid(userId);
+            await notifyAdminOfNewProfile(profile.email, userId, `Signup payment COMPLETE for userId: ${userId}`);
+
+        } else { // This handles recurring subscription payments
+            const tier = customStr2; // This is the plan name (e.g., "Basic Plan")
+            const cycle = customStr3; // This is the subscription type (e.g., "monthly", "annual")
+
+            profile.subscriptionActive = true;
+            profile.membershipTier = tier; // Update membership tier
+            profile.subscriptionPlan = tier; // Redundant but kept for consistency
+            profile.payfastSubscriptionId = params.token || profile.payfastSubscriptionId || "";
+
+            if (params.next_payment_date) {
+                profile.nextPaymentDate = new Date(params.next_payment_date);
+            } else if (params.payment_date && params.subscription_type === "1") {
+                // If next_payment_date is not provided but it's a recurring payment, estimate.
+                const paymentDate = new Date(params.payment_date);
+                const nextDate = new Date(paymentDate);
+                // Assuming monthly if subscription_type is 1 and no explicit frequency
+                nextDate.setMonth(nextDate.getMonth() + 1);
+                profile.nextPaymentDate = nextDate;
+                console.log("ℹ️ Estimated next monthly payment date:", nextDate.toISOString());
+            } else {
+                profile.nextPaymentDate = null;
+            }
+
+            console.log("✅ Profile data prepared for subscription payment for", userId, "to membershipTier:", tier, "cycle:", cycle);
+            await wixData.update("Emergency_Profiles", profile); // Update the existing profile
+            console.log("🔄 Emergency Profile updated for subscription:", userId);
+
+            // Email notifications
+            await emailClientSubscriptionActive(userId, tier);
+            await emailClientMembershipConfirmed(userId, {
+                planName: tier,
+                amount: profile.lastPaymentAmount,
+                paymentId: profile.paymentId,
+                lastPaymentDate: profile.lastPaymentDate,
+                nextPaymentDate: profile.nextPaymentDate
+            });
+            await notifyAdminOfNewProfile(profile.email, userId, `Subscription payment COMPLETE for userId: ${userId}, Plan: ${tier}`);
+        }
+
+    } catch (err) {
+        console.error("❌ handlePayFastNotification: Critical Error during profile update or email trigger for userId:", userId, "Error:", err);
+        await logIPN("processing_error", ip, rawBody, isTrusted, { userId: userId, status: "ERROR", errorMessage: err.message });
+        throw new Error(`Processing failed: ${err.message}`); // Re-throw to be caught by post_notify
+    }
+    console.log("✅ handlePayFastNotification: Successfully processed ITN for userId:", userId);
+}

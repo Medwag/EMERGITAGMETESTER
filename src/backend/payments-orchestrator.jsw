@@ -1,0 +1,47 @@
+// ✅ backend/payments-orchestrator.jsw
+import { createSignupPayment as paystackSignup } from 'backend/paystackUrl.jsw';
+import { generatePayFastUrl as payfastSignup } from 'backend/payfastUrl.jsw';
+import { logPaymentEvent } from 'backend/core/payment-logger.jsw';
+
+/**
+ * Initialize a signup payment (Paystack or PayFast)
+ * @param {string} userId - Wix user ID
+ * @param {string} email - User email
+ * @param {string} gateway - 'paystack' or 'payfast'
+ * @returns {Promise<{success:boolean,redirectUrl?:string,error?:string,gateway:string}>}
+ */
+export async function initiateSignupPayment(userId, email, gateway) {
+  console.log(`🚀 [Orchestrator] Starting payment for ${gateway}`);
+
+  try {
+    let result;
+
+    if (gateway === 'paystack') {
+      result = await paystackSignup(userId, email);
+    } else if (gateway === 'payfast') {
+      result = await payfastSignup(userId, 149.0);
+    } else {
+      throw new Error(`Unknown gateway: ${gateway}`);
+    }
+
+    await logPaymentEvent({
+      userId,
+      gateway,
+      status: result.success ? 'initialized' : 'failed',
+      redirectUrl: result.redirectUrl || '',
+      message: result.error || 'Payment created successfully',
+      payload: result
+    });
+
+    return result;
+  } catch (err) {
+    console.error(`💥 [Orchestrator] Payment init failed for ${gateway}:`, err);
+    await logPaymentEvent({
+      userId,
+      gateway,
+      status: 'error',
+      message: err.message
+    });
+    return { success: false, error: err.message, gateway };
+  }
+}

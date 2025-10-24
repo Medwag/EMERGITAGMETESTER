@@ -1,0 +1,205 @@
+// Live PayFast Configuration Verification
+// Quick test to verify live PayFast setup is working correctly
+
+import { getPayFastEnvironmentInfo, validateLiveSetup } from 'backend/payfast-environment.jsw';
+import { generatePayFastUrl } from 'backend/payfastUrl.jsw';
+import { quickPayFastTest } from 'backend/payfast-try-again.jsw';
+
+export async function verifyLivePayFastSetup() {
+  console.log('🔍 VERIFYING LIVE PAYFAST CONFIGURATION');
+  console.log('======================================');
+  
+  const results = {
+    timestamp: new Date().toISOString(),
+    environment: 'unknown',
+    status: 'unknown',
+    checks: [],
+    recommendations: []
+  };
+
+  try {
+    // Step 1: Check Environment Configuration
+    console.log('\n📋 STEP 1: Environment Configuration');
+    console.log('-----------------------------------');
+    
+    const envInfo = await getPayFastEnvironmentInfo();
+    if (envInfo.success) {
+      results.environment = envInfo.environment;
+      console.log('✅ Environment loaded:', envInfo.environment);
+      console.log('✅ Payment URL:', envInfo.paymentUrl);
+      console.log('✅ Merchant ID:', envInfo.merchantId);
+      
+      results.checks.push({
+        name: 'Environment Loading',
+        status: 'PASS',
+        details: `Environment: ${envInfo.environment}, URL: ${envInfo.paymentUrl}`
+      });
+    } else {
+      console.log('❌ Failed to load environment:', envInfo.error);
+      results.checks.push({
+        name: 'Environment Loading',
+        status: 'FAIL',
+        details: envInfo.error
+      });
+    }
+
+    // Step 2: Validate Live Configuration
+    console.log('\n📋 STEP 2: Live Configuration Validation');
+    console.log('----------------------------------------');
+    
+    const validation = await validateLiveSetup();
+    if (validation.success) {
+      console.log('✅ Live validation completed');
+      console.log('Ready for live:', validation.isReadyForLive);
+      
+      const passedChecks = validation.checks.filter(c => c.status === 'PASS').length;
+      const totalChecks = validation.checks.length;
+      
+      results.checks.push({
+        name: 'Live Configuration',
+        status: validation.isReadyForLive ? 'PASS' : 'NEEDS_ATTENTION',
+        details: `${passedChecks}/${totalChecks} checks passed`,
+        validationDetails: validation.checks
+      });
+      
+      // Log detailed validation results
+      validation.checks.forEach(check => {
+        const icon = check.status === 'PASS' ? '✅' : check.status === 'FAIL' ? '❌' : '⚠️';
+        console.log(`${icon} ${check.name}: ${check.message}`);
+      });
+      
+    } else {
+      console.log('❌ Live validation failed:', validation.error);
+      results.checks.push({
+        name: 'Live Configuration',
+        status: 'FAIL',
+        details: validation.error
+      });
+    }
+
+    // Step 3: Test URL Generation
+    console.log('\n📋 STEP 3: Live URL Generation Test');
+    console.log('----------------------------------');
+    
+    const urlTest = await quickPayFastTest();
+    if (urlTest.success) {
+      console.log('✅ URL generation successful');
+      console.log('✅ URL length:', urlTest.redirectUrl ? urlTest.redirectUrl.length : 0);
+      
+      // Verify it's using live URL
+      const isLiveUrl = urlTest.redirectUrl && urlTest.redirectUrl.includes('www.payfast.co.za');
+      console.log('✅ Using live URL:', isLiveUrl ? 'YES' : 'NO');
+      
+      // Check for common issues
+      const hasPromiseIssues = urlTest.redirectUrl && urlTest.redirectUrl.includes('[object Promise]');
+      console.log('✅ No promise issues:', hasPromiseIssues ? 'NO (ISSUE FOUND)' : 'YES');
+      
+      results.checks.push({
+        name: 'URL Generation',
+        status: isLiveUrl && !hasPromiseIssues ? 'PASS' : 'NEEDS_ATTENTION',
+        details: `Live URL: ${isLiveUrl}, No Promise Issues: ${!hasPromiseIssues}`,
+        urlPreview: urlTest.redirectUrl ? urlTest.redirectUrl.substring(0, 100) + '...' : null
+      });
+      
+    } else {
+      console.log('❌ URL generation failed:', urlTest.error);
+      results.checks.push({
+        name: 'URL Generation',
+        status: 'FAIL',
+        details: urlTest.error
+      });
+    }
+
+    // Overall Assessment
+    const failedChecks = results.checks.filter(c => c.status === 'FAIL');
+    const attentionChecks = results.checks.filter(c => c.status === 'NEEDS_ATTENTION');
+    
+    if (failedChecks.length === 0 && attentionChecks.length === 0) {
+      results.status = 'READY_FOR_LIVE';
+      console.log('\n🎉 LIVE PAYFAST SETUP IS READY!');
+      console.log('✅ All checks passed');
+      console.log('✅ Environment: LIVE');
+      console.log('✅ URL generation working');
+      console.log('✅ Configuration validated');
+      
+      results.recommendations = [
+        'PayFast is ready for live payments',
+        'Test with a small amount first (minimum R5.00)',
+        'Monitor PayFast dashboard for successful transactions',
+        'Check ITN webhook responses for payment confirmations'
+      ];
+      
+    } else if (failedChecks.length === 0) {
+      results.status = 'MOSTLY_READY';
+      console.log('\n⚠️ MOSTLY READY - Minor attention needed');
+      
+      results.recommendations = [
+        'Address minor configuration issues',
+        'Re-run validation after fixes',
+        'Proceed with caution for live testing'
+      ];
+      
+    } else {
+      results.status = 'NEEDS_FIXES';
+      console.log('\n❌ NEEDS FIXES before going live');
+      
+      results.recommendations = [
+        'Fix failed configuration checks',
+        'Verify PayFast merchant credentials',
+        'Re-run validation after fixes',
+        'Do not process live payments until all checks pass'
+      ];
+    }
+
+  } catch (error) {
+    console.error('❌ Verification failed:', error);
+    results.status = 'ERROR';
+    results.error = error.message;
+    results.recommendations = ['Fix technical errors before proceeding'];
+  }
+
+  console.log('\n📊 VERIFICATION SUMMARY');
+  console.log('======================');
+  console.log('Status:', results.status);
+  console.log('Environment:', results.environment);
+  console.log('Checks Completed:', results.checks.length);
+  
+  results.recommendations.forEach((rec, index) => {
+    console.log(`${index + 1}. ${rec}`);
+  });
+
+  return results;
+}
+
+export async function quickLiveCheck() {
+  console.log('⚡ QUICK LIVE PAYFAST CHECK');
+  console.log('===========================');
+  
+  try {
+    const envInfo = await getPayFastEnvironmentInfo();
+    
+    if (envInfo.success) {
+      console.log('Environment:', envInfo.environment);
+      console.log('Is Live:', envInfo.isLive);
+      console.log('Payment URL:', envInfo.paymentUrl);
+      console.log('Merchant ID:', envInfo.merchantId);
+      
+      const summary = {
+        isLive: envInfo.isLive,
+        environment: envInfo.environment,
+        paymentUrl: envInfo.paymentUrl,
+        merchantId: envInfo.merchantId,
+        status: envInfo.isLive ? 'LIVE_ACTIVE' : 'SANDBOX_ACTIVE'
+      };
+      
+      return summary;
+    } else {
+      console.log('❌ Failed to check environment');
+      return { status: 'ERROR', error: envInfo.error };
+    }
+    
+  } catch (error) {
+    console.error('Quick check failed:', error);
+    return { status: 'ERROR', error: error.message };
+  }
+}

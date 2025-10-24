@@ -1,0 +1,71 @@
+// ✅ backend/paystack-config.jsw
+// Centralized Paystack configuration management
+import { getSecret } from 'wix-secrets-backend';
+
+export const PAYSTACK_CONFIG = {
+  USE_LIVE_MODE: true, // ✅ true = production, false = sandbox
+  API_BASE_URL: 'https://api.paystack.co',
+  CURRENCY: 'ZAR',
+
+  SUPPORTED_WEBHOOK_EVENTS: [
+    'charge.success',
+    'invoice.update',
+    'invoice.payment_failed',
+    'charge.dispute.create',
+    'subscription.disable',
+    'subscription.create'
+  ],
+
+  SECRET_KEYS: {
+    LIVE_API_KEY: 'Live_Secret_Key',
+    TEST_API_KEY: 'PaystackSKTest',
+    WEBHOOK_SECRET: 'PAYSTACK_WEBHOOK_SECRET'
+  },
+
+  CALLBACK_URLS: {
+    SIGNUP_SUCCESS: 'https://www.emergitag.me/signup-success',
+    PAYMENT_SUCCESS: 'https://www.emergitag.me/payment-success'
+  }
+};
+
+export async function getPaystackSecretKey() {
+  const keyName = PAYSTACK_CONFIG.USE_LIVE_MODE
+    ? PAYSTACK_CONFIG.SECRET_KEYS.LIVE_API_KEY
+    : PAYSTACK_CONFIG.SECRET_KEYS.TEST_API_KEY;
+
+  console.log(`🔑 Loading Paystack secret: ${keyName}`);
+
+  let secretKey = null;
+  try {
+    secretKey = await getSecret(keyName);
+  } catch (err) {
+    console.warn(`⚠️ Primary secret ${keyName} not found, trying fallbacks`);
+    const fallbacks = PAYSTACK_CONFIG.USE_LIVE_MODE
+      ? ['Live_Secret_Key', 'PaystackSKLive', 'paystack_live']
+      : ['PaystackSKTest', 'paystack_test', 'PAYSTACK_TEST_KEY'];
+    for (const fb of fallbacks) {
+      try {
+        secretKey = await getSecret(fb);
+        if (secretKey) break;
+      } catch (_) {}
+    }
+  }
+
+  if (!secretKey)
+    throw new Error('❌ Paystack secret key not found in Wix Secrets Manager');
+
+  console.log(
+    `✅ Paystack secret loaded (${PAYSTACK_CONFIG.USE_LIVE_MODE ? 'LIVE' : 'TEST'})`
+  );
+  return secretKey;
+}
+
+export function getEnvironmentMode() {
+  return PAYSTACK_CONFIG.USE_LIVE_MODE ? 'live' : 'test';
+}
+
+export function getCallbackUrl(type = 'payment') {
+  return type === 'signup'
+    ? PAYSTACK_CONFIG.CALLBACK_URLS.SIGNUP_SUCCESS
+    : PAYSTACK_CONFIG.CALLBACK_URLS.PAYMENT_SUCCESS;
+}

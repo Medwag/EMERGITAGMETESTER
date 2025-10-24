@@ -1,0 +1,72 @@
+// backend/core/dual-payment-gateway.jsw
+// Last updated: 2025-10-20T17:49:00Z - Fixed PayFast promise issues
+import wixData from 'wix-data';
+
+export async function getPaymentMethods() {
+  return [
+    { id: 'paystack', name: 'Paystack', description: 'Pay securely with Paystack' },
+    { id: 'payfast', name: 'PayFast', description: 'Pay securely with PayFast' },
+  ];
+}
+
+export async function getRecommendedPaymentMethod() {
+  return 'paystack';
+}
+
+export async function createSignupPaymentWithGateway(userId, gateway, email) {
+  console.log(`[DualGateway] STARTING signup for ${gateway} - userId: ${userId}, email: ${email}`);
+  console.log(`[DualGateway] Function called at: ${new Date().toISOString()}`);
+  console.log(`[DualGateway] Deployment timestamp: 2025-10-20T17:49:00Z`);
+  try {
+    let result;
+    if (gateway === 'paystack') {
+      console.log('[DualGateway] Processing Paystack payment...');
+      const m = await import('backend/paystackUrl.jsw');
+      if (typeof m.createSignupPayment !== 'function') {
+        throw new Error('Paystack createSignupPayment() not found');
+      }
+      result = await m.createSignupPayment(userId, email);
+    } else if (gateway === 'payfast') {
+      console.log('🔧 [DualGateway] Processing PayFast payment with enhanced promise handling...');
+      console.log('[DualGateway] Importing payfastUrl.jsw module...');
+      const m = await import('backend/payfastUrl.jsw');
+      if (typeof m.generatePayFastUrl !== 'function') {
+        throw new Error('PayFast generatePayFastUrl() not found in payfastUrl.jsw');
+      }
+      console.log('[DualGateway] Calling generatePayFastUrl...');
+      result = await m.generatePayFastUrl(userId, 149.0);
+      console.log('[DualGateway] PayFast result:', result ? 'success' : 'failed');
+    } else {
+      throw new Error(`Unknown gateway: ${gateway}`);
+    }
+
+    // Audit trail (best-effort)
+    try {
+      await wixData.insert(
+        'PaymentAuditTrail',
+        {
+          timestamp: new Date(),
+          userId,
+          gateway,
+          redirectUrl: result?.redirectUrl || '',
+          status: result?.success ? 'initialized' : 'failed',
+          message: result?.error || 'Payment initialized',
+        },
+        { suppressAuth: true }
+      );
+    } catch (logErr) {
+      console.warn('[DualGateway] Failed to insert audit trail:', logErr?.message);
+    }
+
+    console.log('[DualGateway] Result:', result);
+    return result;
+  } catch (err) {
+    console.error('[DualGateway] Payment init failed:', err);
+    return { success: false, error: err.message, gateway };
+  }
+}
+
+export async function createSubscriptionPaymentWithGateway(userId, plan, annual, gateway) {
+  return { success: false, error: 'Subscriptions not yet implemented', gateway };
+}
+

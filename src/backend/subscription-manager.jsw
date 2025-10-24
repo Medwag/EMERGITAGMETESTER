@@ -1,0 +1,230 @@
+/**
+ * Subscription Manager
+ * Unified interface for creating and managing subscriptions across payment providers
+ * Supports: PayFast and Paystack
+ */
+
+import { createSubscriptionWithCustomer as createPaystackSub } from './paystackSubscriptionWithCustomer.jsw';
+import { generatePayFastSubscriptionUrl } from './payfastUrl.jsw';
+import { getPlanByName } from './plan-utils.jsw';
+import wixData from 'wix-data';
+
+/**
+ * Create a subscription for a user with the specified tier and provider
+ * @param {string} userId - Wix user ID
+ * @param {string} tier - Subscription tier: 'basic' | 'standard' | 'premium'
+ * @param {string} provider - Payment provider: 'payfast' | 'paystack'
+ * @param {string} billingCycle - 'monthly' | 'annual' (default: 'monthly')
+ * @returns {Promise<{success: boolean, url?: string, subscriptionId?: string, message?: string}>}
+ */
+export async function createSubscription(userId, tier, provider, billingCycle = 'monthly') {
+    console.log(`[SubscriptionManager] Creating ${tier} subscription for user ${userId} via ${provider}`);
+    
+    if (!userId) {
+        return { success: false, message: 'User ID is required' };
+    }
+    
+    if (!['basic', 'standard', 'premium'].includes(tier.toLowerCase())) {
+        return { success: false, message: 'Invalid tier. Must be: basic, standard, or premium' };
+    }
+    
+    if (!['payfast', 'paystack'].includes(provider.toLowerCase())) {
+        return { success: false, message: 'Invalid provider. Must be: payfast or paystack' };
+    }
+    
+    // Normalize tier name to match plan names in CMS
+    // Maps: basic → Bronze, standard → Silver, premium → Gold
+    const tierMap = {
+        'basic': 'Bronze',
+        'standard': 'Silver',
+        'premium': 'Gold'
+    };
+    
+    const planName = tierMap[tier.toLowerCase()];
+    const cycle = billingCycle.toLowerCase() === 'annual' ? 'Annual' : 'Monthly';
+    
+    try {
+        if (provider.toLowerCase() === 'paystack') {
+            return await createPaystackSubscription(userId, planName, cycle);
+        } else {
+            return await createPayfastSubscription(userId, planName, cycle);
+        }
+    } catch (error) {
+        console.error(`[SubscriptionManager] Error creating subscription:`, error);
+        return {
+            success: false,
+            message: `Failed to create subscription: ${error.message}`
+        };
+    }
+}
+
+/**
+ * Create Paystack subscription
+ */
+async function createPaystackSubscription(userId, planName, billingCycle) {
+    console.log(`[SubscriptionManager] Creating Paystack subscription: ${planName} (${billingCycle})`);
+    
+    const result = await createPaystackSub(planName, billingCycle, userId);
+    
+    if (result.success) {
+        // Store subscription info in MemberSubscriptions collection
+        await storeSubscription(userId, {
+            tier: planName,
+            provider: 'paystack',
+            billingCycle,
+            subscriptionId: result.subscription_code,
+            status: 'active',
+            startDate: new Date(),
+            amount: result.amount
+        });
+        
+        return {
+            success: true,
+            subscriptionId: result.subscription_code,
+            url: result.authorization_url,
+            message: 'Subscription created successfully'
+        };
+    }
+    
+    return result;
+}
+
+/**
+ * Create PayFast subscription
+ */
+async function createPayfastSubscription(userId, planName, billingCycle) {
+    console.log(`[SubscriptionManager] Creating PayFast subscription: ${planName} (${billingCycle})`);
+    
+    // Get plan details to get amount
+    const plan = await getPlanByName(planName);
+    if (!plan) {
+        return { success: false, message: `Plan not found: ${planName}` };
+    }
+    
+    const amount = billingCycle === 'Annual' ? plan.annualPrice : plan.monthlyPrice;
+    
+    // Generate PayFast subscription URL
+    const url = await generatePayFastSubscriptionUrl(
+        userId,
+        planName,
+        amount,
+        billingCycle.toLowerCase()
+    );
+    
+    if (url) {
+        // Store pending subscription info
+        await storeSubscription(userId, {
+            tier: planName,
+            provider: 'payfast',
+            billingCycle,
+            status: 'pending', // Will be activated by ITN webhook
+            startDate: new Date(),
+            amount
+        });
+        
+        return {
+            success: true,
+            url,
+            message: 'PayFast subscription URL generated'
+        };
+    }
+    
+    return { success: false, message: 'Failed to generate PayFast URL' };
+}
+
+/**
+ * Store subscription in MemberSubscriptions collection
+ */
+async function storeSubscription(userId, subscriptionData) {
+    try {
+        const existingSub = await wixData.query('MemberSubscriptions')
+            .eq('userId', userId)
+            .find();
+        
+        const subscriptionRecord = {
+            userId,
+            ...subscriptionData,
+            createdAt: new Date(),
+            updatedAt: new Date()
+        };
+        
+        if (existingSub.items.length > 0) {
+            // Update existing
+            subscriptionRecord._id = existingSub.items[0]._id;
+            await wixData.update('MemberSubscriptions', subscriptionRecord);
+            console.log(`[SubscriptionManager] Updated subscription for user ${userId}`);
+        } else {
+            // Insert new
+            await wixData.insert('MemberSubscriptions', subscriptionRecord);
+            console.log(`[SubscriptionManager] Created new subscription for user ${userId}`);
+        }
+        
+        return { success: true };
+    } catch (error) {
+        console.error(`[SubscriptionManager] Error storing subscription:`, error);
+        return { success: false, message: error.message };
+    }
+}
+
+/**
+ * Get user's current subscription
+ * @param {string} userId - Wix user ID
+ * @returns {Promise<{tier: string, status: string, provider: string, ...} | null>}
+ */
+export async function getUserSubscription(userId) {
+    try {
+        const result = await wixData.query('MemberSubscriptions')
+            .eq('userId', userId)
+            .find();
+        
+        if (result.items.length > 0) {
+            const sub = result.items[0];
+            console.log(`[SubscriptionManager] Found subscription for user ${userId}: ${sub.tier} (${sub.status})`);
+            return sub;
+        }
+        
+        console.log(`[SubscriptionManager] No subscription found for user ${userId}`);
+        return null;
+    } catch (error) {
+        console.error(`[SubscriptionManager] Error getting subscription:`, error);
+        return null;
+    }
+}
+
+/**
+ * Check if user has an active subscription
+ * @param {string} userId - Wix user ID
+ * @returns {Promise<boolean>}
+ */
+export async function hasActiveSubscription(userId) {
+    const sub = await getUserSubscription(userId);
+    return sub && sub.status === 'active';
+}
+
+/**
+ * Cancel user's subscription
+ * @param {string} userId - Wix user ID
+ * @returns {Promise<{success: boolean, message?: string}>}
+ */
+export async function cancelSubscription(userId) {
+    try {
+        const sub = await getUserSubscription(userId);
+        if (!sub) {
+            return { success: false, message: 'No subscription found' };
+        }
+        
+        // Update status to cancelled
+        await wixData.update('MemberSubscriptions', {
+            _id: sub._id,
+            status: 'cancelled',
+            cancelledAt: new Date(),
+            updatedAt: new Date()
+        });
+        
+        console.log(`[SubscriptionManager] Cancelled subscription for user ${userId}`);
+        return { success: true, message: 'Subscription cancelled' };
+    } catch (error) {
+        console.error(`[SubscriptionManager] Error cancelling subscription:`, error);
+        return { success: false, message: error.message };
+    }
+}

@@ -1,0 +1,121 @@
+// ---------------------------------------------
+// 📬 backend/notifications.jsw
+// Handles sending triggered emails for payments / signups / subscriptions
+// ---------------------------------------------
+
+import { triggeredEmails, contacts } from 'wix-crm-backend';
+import wixUsersBackend from 'wix-users-backend';
+import wixData from 'wix-data';
+
+/*******************************************************
+ * 1️⃣ SIGN-UP SUCCESS TRIGGERED EMAIL
+ * Template ID: UrDYTwt (configured in Wix)
+ *******************************************************/
+export async function sendSignupSuccessTriggeredEmail(userId, firstName, amount, reference) {
+  try {
+    const EMAIL_ID = 'UrDYTwt';
+    console.log(`📧 Sending signup success email for user: ${userId}`);
+
+    // --- Resolve Contact ID ---
+    let contactId = null;
+    const member = await wixUsersBackend.getUser(userId).catch(() => null);
+
+    if (member?.contactId) {
+      const contactInfo = await contacts.getContact(member.contactId).catch(() => null);
+      if (contactInfo) contactId = contactInfo._id;
+    } else {
+      const contactQuery = await wixData.query('Contacts')
+        .eq('_id', userId)
+        .limit(1)
+        .find({ suppressAuth: true });
+      if (contactQuery.items.length > 0) contactId = contactQuery.items[0]._id;
+    }
+
+    if (!contactId) {
+      console.warn('⚠️ No contact ID found, skipping triggered email.');
+      return;
+    }
+
+    // --- Email Variables ---
+    const variables = {
+      firstName: firstName || 'Member',
+      amount: amount || '0.00',
+      reference: reference || 'N/A',
+    };
+
+    // --- Send Triggered Email to user ---
+    await triggeredEmails.emailContact(EMAIL_ID, contactId, { variables });
+    console.log(`✅ Signup success email sent to ${firstName} (${contactId})`);
+
+    // --- Send internal CC/BCC copies manually ---
+    const ccRecipients = ['info@emergistag.me'];
+    const bccRecipients = ['gavin@emergitag.me', 'chalynne@emergitag.me'];
+    const internalRecipients = [...ccRecipients, ...bccRecipients];
+
+    for (const email of internalRecipients) {
+      try {
+        await triggeredEmails.emailContact(EMAIL_ID, email, { variables });
+        console.log(`📩 Internal copy sent to ${email}`);
+      } catch (copyErr) {
+        console.warn(`⚠️ Failed to send internal copy to ${email}:`, copyErr.message);
+      }
+    }
+
+  } catch (err) {
+    console.error('❌ Error sending signup success triggered email:', err);
+  }
+}
+
+/*******************************************************
+ * 2️⃣ SUBSCRIPTION SUCCESS TRIGGERED EMAIL
+ * Template ID: fRSkh7Y (replace with your actual template ID)
+ *******************************************************/
+export async function sendSubscriptionSuccessTriggeredEmail(userId, firstName, planName, amount, nextBillingDate) {
+  try {
+    const EMAIL_ID = 'fRSkh7Y'; // Replace with your actual template ID
+    console.log(`📧 Sending subscription success email for user: ${userId}`);
+
+    // --- Resolve Contact ID ---
+    let contactId = null;
+    const member = await wixUsersBackend.getUser(userId).catch(() => null);
+
+    if (member?.contactId) {
+      const contactInfo = await contacts.getContact(member.contactId).catch(() => null);
+      if (contactInfo) contactId = contactInfo._id;
+    }
+
+    if (!contactId) {
+      console.warn('⚠️ No contact ID found for subscription email.');
+      return;
+    }
+
+    // --- Email Variables ---
+    const variables = {
+      firstName: firstName || 'Member',
+      planName: planName || 'Membership Plan',
+      amount: amount || 'N/A',
+      nextBillingDate: nextBillingDate || 'N/A'
+    };
+
+    // --- Send Triggered Email to user ---
+    await triggeredEmails.emailContact(EMAIL_ID, contactId, { variables });
+    console.log(`✅ Subscription success email sent to ${firstName} (${contactId})`);
+
+    // --- Send internal CC/BCC copies manually ---
+    const ccRecipients = ['info@emergistag.me'];
+    const bccRecipients = ['gavin@emergitag.me', 'chalynne@emergitag.me'];
+    const internalRecipients = [...ccRecipients, ...bccRecipients];
+
+    for (const email of internalRecipients) {
+      try {
+        await triggeredEmails.emailContact(EMAIL_ID, email, { variables });
+        console.log(`📩 Internal copy sent to ${email}`);
+      } catch (copyErr) {
+        console.warn(`⚠️ Failed to send internal copy to ${email}:`, copyErr.message);
+      }
+    }
+
+  } catch (err) {
+    console.error('❌ Error sending subscription success triggered email:', err);
+  }
+}

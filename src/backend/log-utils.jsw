@@ -1,0 +1,19 @@
+// backend/log-utils.jsw
+import wixData from 'wix-data';
+import wixUsersBackend from 'wix-users-backend';
+
+export async function logClientError(message, stack = '') {
+  const userId = wixUsersBackend.currentUser.id;
+  const timestamp = new Date();
+
+  try {
+    await wixData.insert("ErrorLogs", {
+      message,
+      stack,
+      userId,
+      timestamp
+    });
+  } catch (err) {
+    console.error("Failed to log error to CMS:", err);
+  }
+}

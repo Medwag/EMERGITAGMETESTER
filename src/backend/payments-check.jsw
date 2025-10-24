@@ -1,0 +1,93 @@
+import { fetch } from 'wix-fetch';
+import wixSecretsBackend from 'wix-secrets-backend';
+import wixData from 'wix-data'; // ✅ <-- this fixes the error
+
+export async function checkPayments(userEmail) {
+  const [payfastRes, paystackRes] = await Promise.all([
+    checkPayfast(userEmail),
+    checkPaystack(userEmail)
+  ]);
+
+  // Combine results
+  const signup = payfastRes.signup || paystackRes.signup || { found: false };
+  const subscription = payfastRes.subscription || paystackRes.subscription || { found: false };
+
+  return { signup, subscription };
+}
+
+async function checkPaystack(userEmail) {
+  const secretKey = await wixSecretsBackend.getSecret('PaystackLiveSKey');
+  const url = `https://api.paystack.co/transaction?customer=${encodeURIComponent(userEmail)}`;
+  
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${secretKey}` }
+  });
+
+  if (!res.ok) return {};
+
+  const data = await res.json();
+  const transactions = data.data || [];
+  if (transactions.length === 0) return {};
+
+  const signupTx = transactions.find(tx => tx.metadata?.type === 'signup');
+  const subTx = transactions.find(tx => tx.metadata?.type === 'subscription');
+
+  return {
+    signup: signupTx
+      ? {
+          found: true,
+          date: new Date(signupTx.paid_at).toLocaleDateString(),
+          gateway: 'Paystack'
+        }
+      : null,
+    subscription: subTx
+      ? {
+          found: true,
+          planName: subTx.plan?.name || 'Membership Plan',
+          amount: (subTx.amount / 100).toFixed(2),
+          date: new Date(subTx.paid_at).toLocaleDateString(),
+          gateway: 'Paystack'
+        }
+      : null
+  };
+}
+
+async function checkPayfast(userEmail) {
+  const merchantId = await wixSecretsBackend.getSecret('payfast_merchant_id');
+  const merchantKey = await wixSecretsBackend.getSecret('payfast_merchant_key');
+  const passphrase = await wixSecretsBackend.getSecret('payfast_passphrase');
+
+  // ⚠️ Uses CMS fallback (Payfast has no public API for lookup)
+  try {
+    const { items } = await wixData.query('Payfast_Transactions')
+      .eq('customerEmail', userEmail)
+      .find();
+
+    if (items.length === 0) return {};
+
+    const signupTx = items.find(i => i.transactionType === 'signup');
+    const subTx = items.find(i => i.transactionType === 'subscription');
+
+    return {
+      signup: signupTx
+        ? {
+            found: true,
+            date: new Date(signupTx.paymentDate).toLocaleDateString(),
+            gateway: 'Payfast'
+          }
+        : null,
+      subscription: subTx
+        ? {
+            found: true,
+            planName: subTx.planName,
+            amount: subTx.amount,
+            date: new Date(subTx.paymentDate).toLocaleDateString(),
+            gateway: 'Payfast'
+          }
+        : null
+    };
+  } catch (e) {
+    console.error('Payfast CMS lookup error:', e);
+    return {};
+  }
+}

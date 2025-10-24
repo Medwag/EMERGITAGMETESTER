@@ -1,0 +1,71 @@
+// ✅ backend/payfast-utils.jsw
+import { createHash } from 'crypto';
+import wixSecretsBackend from 'wix-secrets-backend';
+
+/**
+ * PHP-compatible URL encoding (PayFast requirement)
+ */
+function payfastUrlEncode(str) {
+  return encodeURIComponent(String(str).trim())
+    .replace(/!/g, '%21')
+    .replace(/'/g, '%27')
+    .replace(/\(/g, '%28')
+    .replace(/\)/g, '%29')
+    .replace(/\*/g, '%2A')
+    .replace(/%20/g, '+') // ✅ spaces become '+'
+    .replace(/%([0-9a-f]{2})/g, (match, hex) => '%' + hex.toUpperCase()); // ✅ uppercase hex
+}
+
+/**
+ * ✅ Generate PayFast URL (LIVE)
+ */
+export async function generatePayFastUrl({ amount, email, mPaymentId }) {
+  const merchantId = (await wixSecretsBackend.getSecret('payfast_merchant_id')).trim();
+  const merchantKey = (await wixSecretsBackend.getSecret('payfast_merchant_key')).trim();
+  const passphrase = (await wixSecretsBackend.getSecret('payfast_passphrase')).trim();
+
+  const returnUrl = 'https://www.emergitag.me/payment-success';
+  const cancelUrl = 'https://www.emergitag.me/payment-cancel';
+  const notifyUrl = 'https://www.emergitag.me/_functions/payfastWebhook';
+
+  // ✅ Validate inputs
+  if (!email || !email.includes('@')) throw new Error('Invalid email address');
+  if (isNaN(Number(amount))) throw new Error('Invalid amount');
+  if (!mPaymentId) throw new Error('Missing mPaymentId');
+
+  // ✅ Build parameters (trim everything)
+  const params = {
+    amount: Number(amount).toFixed(2),
+    cancel_url: cancelUrl,
+    email_address: email.trim(),
+    item_name: 'Emergency Profile Sign-Up Fee',
+    m_payment_id: mPaymentId.trim(),
+    merchant_id: merchantId.trim(),
+    merchant_key: merchantKey.trim(),
+    notify_url: notifyUrl,
+    return_url: returnUrl
+  };
+
+  // ✅ Sort keys alphabetically
+  const sortedKeys = Object.keys(params).sort();
+
+  // ✅ Build signature base string
+  let signatureBase = sortedKeys
+    .map((key) => `${key}=${payfastUrlEncode(params[key])}`)
+    .join('&');
+
+  // ✅ Append passphrase
+  if (passphrase) {
+    signatureBase += `&passphrase=${payfastUrlEncode(passphrase)}`;
+  }
+
+  // ✅ Generate MD5 hash (PayFast requirement)
+  const signature = createHash('md5').update(signatureBase).digest('hex').toLowerCase();
+
+  // ✅ Build final redirect query string (same order!)
+  const queryString =
+    sortedKeys.map((key) => `${key}=${payfastUrlEncode(params[key])}`).join('&') +
+    `&signature=${signature}`;
+
+  return `https://www.payfast.co.za/eng/process?${queryString}`;
+}

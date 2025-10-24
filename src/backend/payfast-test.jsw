@@ -1,0 +1,121 @@
+// ✅ ISOLATED PayFast Test - to verify signature generation
+import wixSecretsBackend from 'wix-secrets-backend';
+import crypto from 'crypto';
+
+/**
+ * Test PayFast signature with EXACT parameters from your URL
+ */
+export async function testExactSignature() {
+  try {
+    console.log('🧪 Testing EXACT signature from your URL...');
+    
+    // PayFast URL encoding (exact PHP replica)
+    function payfastUrlEncode(str) {
+      return encodeURIComponent(String(str))
+        .replace(/!/g, '%21')
+        .replace(/'/g, '%27')
+        .replace(/\(/g, '%28')
+        .replace(/\)/g, '%29')
+        .replace(/\*/g, '%2A')
+        .replace(/%20/g, '+');
+    }
+    
+    // Get your actual credentials
+    const merchantId = await wixSecretsBackend.getSecret('payfast_merchant_id');
+    const merchantKey = await wixSecretsBackend.getSecret('payfast_merchant_key');
+    const passphrase = await wixSecretsBackend.getSecret('payfast_passphrase');
+    
+    console.log('🔑 Credentials check:', {
+      merchantId: merchantId === '30505487',
+      merchantKey: merchantKey === 'vn4lqdm8guwbi',
+      hasPassphrase: !!passphrase
+    });
+    
+    // EXACT parameters from your URL (without the extra fields)
+    const correctParams = {
+      merchant_id: '30505487',
+      merchant_key: 'vn4lqdm8guwbi',
+      return_url: 'https://www.emergitag.me/payment-success',
+      cancel_url: 'https://www.emergitag.me/payment-cancel',
+      notify_url: 'https://www.emergitag.me/_functions/payfastWebhook',
+      amount: '250.00',
+      item_name: 'Emergency Profile Sign-Up Fee',
+      item_description: 'Registration fee for Emergency Profile service',
+      email_address: 'wjkanes@gmail.com',
+      m_payment_id: '469ee628-f4e6-4d0b-b8fb-0ce4311aca3f'
+    };
+    
+    // Build signature string (without email_confirmation fields)
+    let signatureString = '';
+    Object.keys(correctParams).forEach(key => {
+      const value = correctParams[key];
+      if (value && String(value).trim() !== '') {
+        signatureString += `${key}=${payfastUrlEncode(String(value).trim())}&`;
+      }
+    });
+    
+    signatureString = signatureString.slice(0, -1);
+    if (passphrase) {
+      signatureString += `&passphrase=${payfastUrlEncode(passphrase)}`;
+    }
+    
+    const correctSignature = crypto.createHash('md5').update(signatureString).digest('hex');
+    
+    console.log('🧪 Signature string (correct):', signatureString);
+    console.log('🧪 Correct signature:', correctSignature);
+    
+    // Now test with the WRONG parameters (including email_confirmation)
+    const wrongParams = {
+      ...correctParams,
+      email_confirmation: '1',
+      confirmation_address: 'wjkanes@gmail.com'
+    };
+    
+    let wrongSignatureString = '';
+    Object.keys(wrongParams).forEach(key => {
+      const value = wrongParams[key];
+      if (value && String(value).trim() !== '') {
+        wrongSignatureString += `${key}=${payfastUrlEncode(String(value).trim())}&`;
+      }
+    });
+    
+    wrongSignatureString = wrongSignatureString.slice(0, -1);
+    if (passphrase) {
+      wrongSignatureString += `&passphrase=${payfastUrlEncode(passphrase)}`;
+    }
+    
+    const wrongSignature = crypto.createHash('md5').update(wrongSignatureString).digest('hex');
+    const actualSignature = '5521085cb8ee126f4726d24b6f00781f';
+    
+    console.log('🧪 Signature string (with extra fields):', wrongSignatureString);
+    console.log('🧪 Wrong signature:', wrongSignature);
+    console.log('🧪 Actual signature from URL:', actualSignature);
+    console.log('🧪 Matches wrong signature:', wrongSignature === actualSignature);
+    
+    // Also test if the issue is URL encoding
+    let testEncoding = 'Emergency Profile Sign-Up Fee';
+    console.log('🧪 URL encoding test:');
+    console.log('  encodeURIComponent:', encodeURIComponent(testEncoding));
+    console.log('  with + replacement:', encodeURIComponent(testEncoding).replace(/%20/g, '+'));
+    
+    return {
+      correctSignature,
+      wrongSignature,
+      actualSignature,
+      matchesWrong: wrongSignature === actualSignature,
+      matchesCorrect: correctSignature === actualSignature,
+      urlEncodingTest: {
+        original: testEncoding,
+        encoded: encodeURIComponent(testEncoding).replace(/%20/g, '+')
+      }
+    };
+    
+  } catch (error) {
+    console.error('🧪 Test error:', error);
+    return { error: error.message };
+  }
+}
+
+export default {
+  testExactSignature
+};

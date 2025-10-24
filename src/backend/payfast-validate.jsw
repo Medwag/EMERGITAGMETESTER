@@ -1,0 +1,64 @@
+// Minimal PayFast test to validate current implementation
+import { generatePayFastSignature } from 'backend/payfastUtils.jsw';
+
+export async function validateCurrentImplementation() {
+  console.log('🔍 VALIDATING CURRENT PAYFAST IMPLEMENTATION');
+  console.log('============================================');
+  
+  try {
+    // Test with minimal PayFast parameters
+    const testParams = {
+      merchant_id: '10000100',
+      merchant_key: '46f0cd694581a',
+      amount: '149.00',
+      item_name: 'EmergiTag Signup Fee',
+      return_url: 'https://www.emergitag.me/signup-success',
+      cancel_url: 'https://www.emergitag.me/signup-cancelled',
+      notify_url: 'https://www.emergitag.me/_functions/payfastWebhook'
+    };
+    
+    console.log('Test parameters:', Object.keys(testParams));
+    
+    // Test without passphrase
+    const signatureNoPass = generatePayFastSignature(testParams, '');
+    console.log('Signature (no passphrase):', signatureNoPass);
+    console.log('Length:', signatureNoPass ? signatureNoPass.length : 0);
+    console.log('Valid MD5 format:', /^[a-f0-9]{32}$/.test(signatureNoPass || ''));
+    
+    // Test with passphrase
+    const signatureWithPass = generatePayFastSignature(testParams, 'test123');
+    console.log('Signature (with passphrase):', signatureWithPass);
+    console.log('Length:', signatureWithPass ? signatureWithPass.length : 0);
+    console.log('Valid MD5 format:', /^[a-f0-9]{32}$/.test(signatureWithPass || ''));
+    
+    // Test with empty values (should be excluded)
+    const testParamsWithEmpty = {
+      ...testParams,
+      empty_field: '',
+      null_field: null,
+      undefined_field: undefined,
+      custom_str1: 'test'
+    };
+    
+    const signatureFiltered = generatePayFastSignature(testParamsWithEmpty, '');
+    console.log('Signature (with empty values):', signatureFiltered);
+    console.log('Same as no empty values:', signatureFiltered === signatureNoPass);
+    
+    return {
+      success: true,
+      signatureNoPass,
+      signatureWithPass,
+      signatureFiltered,
+      allValidFormat: [signatureNoPass, signatureWithPass, signatureFiltered].every(sig => 
+        sig && /^[a-f0-9]{32}$/.test(sig)
+      )
+    };
+    
+  } catch (error) {
+    console.error('Validation failed:', error);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}

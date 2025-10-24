@@ -1,0 +1,594 @@
+// ✅ backend/verifyOrRecoverPaystackTransaction.jsw
+import wixData from 'wix-data';
+import { fetch } from 'wix-fetch'; 
+import { getPaystackSecretKey, PAYSTACK_CONFIG } from 'backend/paystack-config.jsw';
+
+// Safe crypto import - only load when needed
+let crypto = null;
+async function getCrypto() {
+    if (!crypto) {
+        try {
+            crypto = await import('crypto');
+            return crypto;
+        } catch (err) {
+            console.warn('Crypto module not available:', err.message);
+            return null;
+        }
+    }
+    return crypto;
+}
+
+// Fallback UUID generation when crypto is not available
+function generateFallbackUUID() {
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+        const r = Math.random() * 16 | 0;
+        const v = c === 'x' ? r : (r & 0x3 | 0x8);
+        return v.toString(16);
+    });
+}
+
+// Safe UUID generation with fallback
+async function generateSafeUUID() {
+    const cryptoLib = await getCrypto();
+    if (cryptoLib && cryptoLib.randomUUID) {
+        return cryptoLib.randomUUID();
+    }
+    return generateFallbackUUID();
+}
+
+export async function verifyOrRecoverPaystackTransaction(email) {
+    try {
+        const secretKey = await getPaystackSecretKey();
+        if (!secretKey) throw new Error("Paystack secret not set or configured correctly.");
+
+        console.log(`🔍 VERIFICATION START: Starting verification/recovery for email: ${email}`);
+        console.log(`🔑 Secret key configured: ${secretKey ? 'YES' : 'NO'} (prefix: ${secretKey?.substring(0, 10)}...)`);
+
+        // First, try to find transactions
+        console.log('📋 Step 1: Checking Paystack transactions...');
+        const transactionResult = await checkPaystackTransactions(email, secretKey);
+        
+        console.log('🔍 Transaction result:', transactionResult);
+        if (transactionResult && transactionResult.success) {
+            console.log(`✅ SUCCESS via transactions: ${transactionResult.reference}`);
+            return transactionResult.reference;
+        }
+        
+        // If no transactions found, try checking subscriptions directly
+        console.log('📋 Step 2: Checking Paystack subscriptions...');
+        const subscriptionResult = await checkPaystackSubscriptions(email, secretKey);
+        
+        console.log('🔍 Subscription result:', subscriptionResult);
+        if (subscriptionResult && subscriptionResult.success) {
+            console.log(`✅ SUCCESS via subscriptions: ${subscriptionResult.reference}`);
+            return subscriptionResult.reference;
+        }
+        
+        console.log(`❌ FINAL RESULT: No valid transactions or subscriptions found for email: ${email}`);
+        return null;
+
+    } catch (err) {
+        console.error("❌ verifyOrRecoverPaystackTransaction error:", err.message);
+        throw err;
+    }
+}
+
+async function checkPaystackTransactions(email, secretKey) {
+    try {
+        // Query Paystack for recent transactions for this email
+        const response = await fetch(`https://api.paystack.co/transaction?email=${email}`, {
+            method: "GET",
+            headers: { Authorization: `Bearer ${secretKey}` }
+        });
+
+        /** @type {{status: boolean, message?: string, data: any[]}} */
+        const result = await response.json();
+
+        // COMPREHENSIVE LOGGING: Full Paystack response
+        console.log("🔍 FULL PAYSTACK TRANSACTION RESPONSE:", JSON.stringify(result, null, 2));
+
+        // IMPROVEMENT: Log full Paystack response on failure
+        if (!result.status) {
+            console.error("Paystack Transaction API Response (Verification Error):", result);
+            return { success: false, error: result.message || "Paystack transaction query failed" };
+        }
+
+        // Find the most recent successful transaction - be more flexible for live clients
+        console.log(`🔍 Searching for successful transactions for email: ${email}`);
+        console.log(`📊 Total transactions found: ${result.data.length}`);
+        
+        // Log all successful transactions for debugging
+        const successfulTransactions = result.data.filter(t => t.status === "success");
+        console.log(`✅ Successful transactions found: ${successfulTransactions.length}`);
+        
+        // ENHANCED LOGGING: Log ALL transaction details
+        result.data.forEach((t, index) => {
+            console.log(`🔍 Transaction ${index + 1} [Status: ${t.status}]:`, {
+                reference: t.reference,
+                amount: t.amount,
+                status: t.status,
+                currency: t.currency,
+                customer_email: t.customer?.email,
+                customer_id: t.customer?.id,
+                customer_code: t.customer?.customer_code,
+                paid_at: t.paid_at,
+                created_at: t.created_at,
+                transaction_type: t.metadata?.transaction_type,
+                plan_name: t.metadata?.planName || t.metadata?.membershipTier,
+                full_metadata: t.metadata,
+                authorization: t.authorization
+            });
+        });
+        
+        successfulTransactions.forEach((t, index) => {
+            console.log(`Transaction ${index + 1}:`, {
+                reference: t.reference,
+                amount: t.amount,
+                metadata: t.metadata,
+                transaction_type: t.metadata?.transaction_type,
+                plan_name: t.metadata?.planName || t.metadata?.membershipTier,
+                created_at: t.created_at
+            });
+        });
+
+        // Try to find signup fee transaction first
+        let tx = result.data.find(t => t.status === "success" && t.metadata?.transaction_type === "signup_fee");
+        
+        // If no signup fee transaction, look for any successful transaction with plan data
+        if (!tx) {
+            console.log('⚠️ No signup_fee transaction found, looking for any successful transaction with plan data...');
+            tx = result.data.find(t => 
+                t.status === "success" && 
+                (t.metadata?.membershipTier || t.metadata?.planName || t.metadata?.plan)
+            );
+        }
+        
+        // If still no transaction, get the most recent successful one
+        if (!tx && successfulTransactions.length > 0) {
+            console.log('⚠️ No transaction with plan data found, using most recent successful transaction...');
+            tx = successfulTransactions.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
+        }
+
+        if (!tx) {
+            console.log(`❌ No successful transaction found for email: ${email}`);
+            return null; // nothing found
+        }
+        
+        console.log(`✅ Using transaction: ${tx.reference} with metadata:`, tx.metadata);
+
+        // Upsert PaystackTransactions
+        const existingTx = await wixData.query("PaystackTransactions").eq("_id", tx.reference).limit(1).find({ suppressAuth: true });
+        if (existingTx.items.length > 0) {
+            await wixData.update("PaystackTransactions", {
+                ...existingTx.items[0],
+                status: "success",
+                // CRITICAL FIX: Removed * 1000 for date parsing. Assuming tx.paid_at is ISO string.
+                paidAt: new Date(tx.paid_at) 
+            }, { suppressAuth: true });
+            console.log(`✅ Updated existing PaystackTransaction for reference: ${tx.reference}`);
+        } else {
+            await wixData.insert("PaystackTransactions", {
+                _id: tx.reference,
+                userId: tx.metadata.userId,
+                email: tx.customer.email,
+                amount: tx.amount / 100,
+                status: "success",
+                transactionType: "signup_fee",
+                // CRITICAL FIX: Removed * 1000 for date parsing. Assuming tx.paid_at is ISO string.
+                paidAt: new Date(tx.paid_at) 
+            }, { suppressAuth: true });
+            console.log(`✅ Inserted new PaystackTransaction for reference: ${tx.reference}`);
+        }
+
+        // Upsert Emergency Profile
+        const userId = tx.metadata?.userId || tx.customer?.id; // Try userId first, fallback to customer ID
+        if (!userId) {
+            console.error(`❌ No userId found in transaction metadata for reference: ${tx.reference}`);
+            console.log('Transaction metadata:', tx.metadata);
+            console.log('Customer data:', tx.customer);
+            throw new Error('Cannot create profile: userId not found in transaction');
+        }
+        
+        console.log(`👤 Processing profile for userId: ${userId}`);
+        
+        // CRITICAL: Query using _owner for consistency with Wix Users
+        const existingProfile = await wixData.query("Emergency_Profiles").eq("_owner", userId).limit(1).find({ suppressAuth: true });
+
+        if (existingProfile.items.length > 0) {
+            const profile = existingProfile.items[0];
+            
+            // Extract plan information from various possible metadata fields
+            const planName = tx.metadata?.membershipTier || 
+                           tx.metadata?.planName || 
+                           tx.metadata?.plan || 
+                           tx.metadata?.subscription_plan ||
+                           tx.metadata?.tier;
+                           
+            // Additional plan inference from transaction amount if metadata is missing
+            let inferredPlan = planName;
+            if (!planName || planName === 'undefined' || planName === 'null') {
+                // Try to infer plan from transaction amount (in kobo/cents)
+                const amount = parseInt(tx.amount) || 0;
+                if (amount >= 50000) { // R500+ = Gold
+                    inferredPlan = "Gold";
+                    console.log(`� Inferred Gold plan from amount: R${amount/100}`);
+                } else if (amount >= 25000) { // R250+ = Silver  
+                    inferredPlan = "Silver";
+                    console.log(`💡 Inferred Silver plan from amount: R${amount/100}`);
+                } else if (amount >= 10000) { // R100+ = Bronze
+                    inferredPlan = "Bronze";
+                    console.log(`💡 Inferred Bronze plan from amount: R${amount/100}`);
+                } else if (amount > 0) {
+                    inferredPlan = "Bronze"; // Default for any paid amount
+                    console.log(`💡 Inferred Bronze plan from small payment: R${amount/100}`);
+                }
+            }
+            
+            console.log(`📋 Final plan determination: Original=${planName}, Inferred=${inferredPlan}`);
+            
+            // SECURITY FIX: Only set to paid if we have confirmed transaction with plan data
+            if (inferredPlan && inferredPlan !== 'undefined' && inferredPlan !== 'null') {
+                profile.subscriptionPaid = true;
+                profile.subscriptionActive = true;
+                profile.planStatus = "active";
+                profile.membershipTier = inferredPlan;
+                console.log(`✅ Setting existing profile to PAID with plan: ${inferredPlan}`);
+            } else {
+                console.warn(`⚠️ No valid plan data in transaction metadata for userId: ${userId}, setting to Free`);
+                console.log('Available metadata keys:', Object.keys(tx.metadata || {}));
+                console.log('Transaction amount:', tx.amount, 'Status:', tx.status);
+                profile.membershipTier = "Free";
+                profile.subscriptionPaid = false;
+                profile.subscriptionActive = false;
+                profile.planStatus = "inactive";
+            }
+            
+            // Also update email and other profile data from transaction
+            if (tx.customer?.email && !profile.emailAddress) {
+                profile.emailAddress = tx.customer.email;
+            }
+            if (tx.customer?.first_name && !profile.firstName) {
+                profile.firstName = tx.customer.first_name;
+            }
+            
+            await wixData.update("Emergency_Profiles", profile, { suppressAuth: true });
+            console.log(`✅ Updated existing Emergency_Profile for userId: ${userId} with plan: ${profile.membershipTier}`);
+        } else {
+            // SECURITY FIX: Never auto-assign paid status without plan verification
+            const safeUUID = await generateSafeUUID();
+            const profileData = {
+                _owner: userId, // CRITICAL: Set _owner for new profiles
+                userId: userId, // Also store custom userId for easier querying
+                publicViewId: safeUUID, // Generate secure unique ID
+                dateCreated: new Date(),
+                emailAddress: tx.customer?.email || '',
+                firstName: tx.customer?.first_name || '',
+                lastName: tx.customer?.last_name || ''
+            };
+            
+            // Extract plan information from various possible metadata fields
+            const planName = tx.metadata?.membershipTier || 
+                           tx.metadata?.planName || 
+                           tx.metadata?.plan || 
+                           tx.metadata?.subscription_plan ||
+                           tx.metadata?.tier;
+                           
+            // Additional plan inference from transaction amount if metadata is missing
+            let inferredPlan = planName;
+            if (!planName || planName === 'undefined' || planName === 'null') {
+                // Try to infer plan from transaction amount (in kobo/cents)
+                const amount = parseInt(tx.amount) || 0;
+                if (amount >= 50000) { // R500+ = Gold
+                    inferredPlan = "Gold";
+                    console.log(`💡 Inferred Gold plan from amount: R${amount/100}`);
+                } else if (amount >= 25000) { // R250+ = Silver  
+                    inferredPlan = "Silver";
+                    console.log(`💡 Inferred Silver plan from amount: R${amount/100}`);
+                } else if (amount >= 10000) { // R100+ = Bronze
+                    inferredPlan = "Bronze";
+                    console.log(`💡 Inferred Bronze plan from amount: R${amount/100}`);
+                } else if (amount > 0) {
+                    inferredPlan = "Bronze"; // Default for any paid amount
+                    console.log(`💡 Inferred Bronze plan from small payment: R${amount/100}`);
+                }
+            }
+            
+            console.log(`📋 Final plan determination for new profile: Original=${planName}, Inferred=${inferredPlan}`);
+            
+            // Only assign paid status if we have confirmed plan data
+            if (inferredPlan && inferredPlan !== 'undefined' && inferredPlan !== 'null') {
+                profileData.subscriptionPaid = true;
+                profileData.subscriptionActive = true;
+                profileData.planStatus = "active";
+                profileData.membershipTier = inferredPlan;
+                console.log(`✅ Creating new PAID profile with plan: ${inferredPlan}`);
+            } else {
+                console.warn(`⚠️ No valid plan data in transaction metadata for userId: ${userId}, creating Free profile`);
+                console.log('Available metadata keys:', Object.keys(tx.metadata || {}));
+                console.log('Transaction amount:', tx.amount, 'Status:', tx.status);
+                profileData.subscriptionPaid = false;
+                profileData.subscriptionActive = false;
+                profileData.planStatus = "inactive";
+                profileData.membershipTier = "Free";
+            }
+            
+            await wixData.insert("Emergency_Profiles", profileData, { suppressAuth: true });
+            console.log(`✅ Inserted new Emergency_Profile for userId: ${userId} with tier: ${profileData.membershipTier}`);
+        }
+
+        return { success: true, reference: tx.reference };
+
+    } catch (err) {
+        console.error("❌ checkPaystackTransactions error:", err.message);
+        return { success: false, error: err.message };
+    }
+}
+
+async function checkPaystackSubscriptions(email, secretKey) {
+    try {
+        console.log(`🔍 ENHANCED SUBSCRIPTION CHECK: Searching for subscriptions by email: ${email}`);
+        console.log(`🔑 Using secret key prefix: ${secretKey.substring(0, 10)}...`);
+        
+        // ENHANCED METHOD 1: Use the successful "all subscriptions" approach from comprehensive diagnostic
+        console.log(`📡 METHOD 1: Searching all subscriptions and filtering by email...`);
+        const allSubsURL = `${PAYSTACK_CONFIG.API_BASE_URL}/subscription?perPage=100`;
+        console.log(`📡 All Subscriptions API URL: ${allSubsURL}`);
+        
+        const allSubsResponse = await fetch(allSubsURL, {
+            method: 'GET',
+            headers: {
+                'Authorization': `Bearer ${secretKey}`,
+                'Content-Type': 'application/json'
+            }
+        });
+
+        console.log(`🔍 All Subscriptions API Response Status: ${allSubsResponse.status}`);
+        const allSubsData = await allSubsResponse.json();
+        
+        // COMPREHENSIVE LOGGING: Full subscription response
+        console.log("🔍 FULL PAYSTACK ALL SUBSCRIPTIONS RESPONSE:", JSON.stringify(allSubsData, null, 2));
+
+        let foundSubscriptions = [];
+        
+        if (allSubsResponse.ok && allSubsData.status && allSubsData.data?.length) {
+            // Filter subscriptions by customer email
+            const matchingSubscriptions = allSubsData.data.filter(sub => 
+                sub.customer?.email?.toLowerCase() === email.toLowerCase()
+            );
+            
+            console.log(`📊 Found ${matchingSubscriptions.length} subscription(s) matching email from ${allSubsData.data.length} total subscriptions`);
+            foundSubscriptions = matchingSubscriptions;
+        }
+        
+        // FALLBACK METHOD 2: Customer-based search (original method)
+        if (foundSubscriptions.length === 0) {
+            console.log(`🔄 METHOD 2: Fallback to customer-based subscription search...`);
+            
+            // First, find the customer by email
+            const customerURL = `${PAYSTACK_CONFIG.API_BASE_URL}/customer?email=${encodeURIComponent(email)}`;
+            console.log(`� Customer API URL: ${customerURL}`);
+            
+            const customerResponse = await fetch(customerURL, {
+                method: 'GET',
+                headers: {
+                    'Authorization': `Bearer ${secretKey}`,
+                    'Content-Type': 'application/json'
+                }
+            });
+
+            console.log(`🔍 Customer API Response Status: ${customerResponse.status}`);
+            const customerData = await customerResponse.json();
+            
+            console.log("🔍 CUSTOMER SEARCH RESPONSE:", JSON.stringify(customerData, null, 2));
+
+            if (customerResponse.ok && customerData.status && customerData.data?.length) {
+                const customer = customerData.data[0];
+                console.log(`✅ Found customer: ${customer.customer_code}`);
+                
+                // Now get subscriptions for this customer
+                const subscriptionURL = `${PAYSTACK_CONFIG.API_BASE_URL}/subscription?customer=${customer.customer_code}`;
+                console.log(`📡 Customer Subscription API URL: ${subscriptionURL}`);
+                
+                const subsResponse = await fetch(subscriptionURL, {
+                    method: 'GET',
+                    headers: {
+                        'Authorization': `Bearer ${secretKey}`,
+                        'Content-Type': 'application/json'
+                    }
+                });
+
+                console.log(`🔍 Customer Subscription API Response Status: ${subsResponse.status}`);
+                const subsData = await subsResponse.json();
+                
+                console.log("🔍 CUSTOMER SUBSCRIPTION RESPONSE:", JSON.stringify(subsData, null, 2));
+                
+                if (subsResponse.ok && subsData.status && subsData.data?.length) {
+                    foundSubscriptions = subsData.data;
+                    console.log(`📊 Found ${subsData.data.length} subscription(s) via customer method`);
+                }
+            }
+        }
+        
+        // Process found subscriptions
+        if (foundSubscriptions.length === 0) {
+            console.log('❌ No subscriptions found via any method');
+            return { success: false, error: 'No subscriptions found via comprehensive search' };
+        }
+
+        console.log(`📊 TOTAL SUBSCRIPTIONS FOUND: ${foundSubscriptions.length}`);
+        
+        // ENHANCED LOGGING: Log ALL subscription details with analysis
+        foundSubscriptions.forEach((sub, index) => {
+            console.log(`🔍 Subscription ${index + 1}:`, {
+                subscription_code: sub.subscription_code,
+                email_token: sub.email_token,
+                status: sub.status,
+                amount: sub.amount,
+                currency: sub.currency,
+                next_payment_date: sub.next_payment_date,
+                created_at: sub.created_at,
+                customer: {
+                    id: sub.customer?.id,
+                    customer_code: sub.customer?.customer_code,
+                    email: sub.customer?.email,
+                    first_name: sub.customer?.first_name,
+                    last_name: sub.customer?.last_name
+                },
+                plan: {
+                    id: sub.plan?.id,
+                    name: sub.plan?.name,
+                    amount: sub.plan?.amount,
+                    currency: sub.plan?.currency,
+                    interval: sub.plan?.interval
+                },
+                authorization: sub.authorization,
+                invoices_history: sub.invoices_history?.length || 0
+            });
+        });
+        
+        // ENHANCED SUBSCRIPTION SELECTION: Find the best subscription to use
+        console.log(`🎯 SUBSCRIPTION SELECTION: Analyzing ${foundSubscriptions.length} subscription(s)`);
+        
+        // Priority: Active subscription > Most recent > Any subscription
+        let selectedSub = null;
+        
+        // First, try to find an active subscription
+        const activeSubscriptions = foundSubscriptions.filter(sub => sub.status === 'active');
+        console.log(`🟢 Active subscriptions found: ${activeSubscriptions.length}`);
+        
+        if (activeSubscriptions.length > 0) {
+            // Use the most recent active subscription
+            selectedSub = activeSubscriptions.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
+            console.log(`✅ Selected ACTIVE subscription: ${selectedSub.subscription_code}`);
+        } else {
+            // Use the most recent subscription regardless of status
+            selectedSub = foundSubscriptions.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
+            console.log(`⚠️ Selected most recent subscription (status: ${selectedSub.status}): ${selectedSub.subscription_code}`);
+        }
+        
+        console.log(`📋 SELECTED SUBSCRIPTION DETAILS:`, {
+            subscription_code: selectedSub.subscription_code,
+            status: selectedSub.status,
+            plan_name: selectedSub.plan?.name,
+            amount: selectedSub.amount,
+            customer_code: selectedSub.customer?.customer_code,
+            customer_email: selectedSub.customer?.email
+        });
+        
+        // Extract customer information from subscription
+        const customer = selectedSub.customer || {
+            customer_code: selectedSub.customer?.customer_code || 'unknown',
+            email: email,
+            first_name: selectedSub.customer?.first_name || '',
+            last_name: selectedSub.customer?.last_name || ''
+        };
+        
+        // Create profile based on subscription data using customer_code as userId
+        const userId = customer.customer_code;
+        console.log(`👤 SUBSCRIPTION PROFILE: Creating/updating profile for userId: ${userId}`);
+        console.log(`📧 Email: ${email}`);
+        console.log(`🏢 Customer data being passed:`, customer);
+        console.log(`📋 Subscription data being passed:`, selectedSub);
+        
+        await upsertProfileFromSubscription({
+            userId: userId,
+            email: email,
+            customer: customer,
+            subscription: selectedSub
+        });
+        
+        return { success: true, reference: selectedSub.subscription_code };
+
+    } catch (err) {
+        console.error("❌ checkPaystackSubscriptions error:", err.message);
+        return { success: false, error: err.message };
+    }
+}
+
+async function upsertProfileFromSubscription({ userId, email, customer, subscription }) {
+    try {
+        console.log(`🔍 PROFILE UPSERT: Starting profile upsert process`);
+        console.log(`👤 User ID: ${userId}`);
+        console.log(`📧 Email: ${email}`);
+        console.log(`🏢 Customer object:`, customer);
+        console.log(`📋 Subscription object:`, subscription);
+        
+        // Query for existing profile by email if userId doesn't work
+        console.log(`🔍 Searching for existing profile by _owner: ${userId}`);
+        let existingProfile = await wixData.query("Emergency_Profiles").eq("_owner", userId).limit(1).find({ suppressAuth: true });
+        
+        console.log(`📊 Profile search by _owner result: ${existingProfile.items.length} items found`);
+        
+        if (existingProfile.items.length === 0) {
+            // Try to find by email
+            console.log(`🔍 No profile found by _owner, searching by emailAddress: ${email}`);
+            existingProfile = await wixData.query("Emergency_Profiles").eq("emailAddress", email).limit(1).find({ suppressAuth: true });
+            console.log(`📊 Profile search by email result: ${existingProfile.items.length} items found`);
+            
+            if (existingProfile.items.length > 0) {
+                console.log(`✅ Found existing profile by email:`, existingProfile.items[0]);
+            }
+        } else {
+            console.log(`✅ Found existing profile by _owner:`, existingProfile.items[0]);
+        }
+
+        const planName = subscription.plan?.name || 'Unknown Plan';
+        const isActive = subscription.status === 'active';
+        
+        console.log(`📋 PLAN EXTRACTION:`)
+        console.log(`  - Plan name: ${planName}`);
+        console.log(`  - Is active: ${isActive}`);
+        console.log(`  - Subscription status: ${subscription.status}`);
+        console.log(`  - Full plan object:`, subscription.plan);
+
+        if (existingProfile.items.length > 0) {
+            console.log(`🔄 UPDATING EXISTING PROFILE`);
+            // Update existing profile
+            const profile = existingProfile.items[0];
+            
+            console.log(`📋 Profile before update:`, profile);
+            
+            profile.subscriptionPaid = isActive;
+            profile.subscriptionActive = isActive;
+            profile.planStatus = subscription.status;
+            profile.membershipTier = planName;
+            profile.paystackSubscriptionCode = subscription.subscription_code;
+            profile.customer_code = customer.customer_code;
+            
+            console.log(`📋 Profile after update (before save):`, profile);
+            
+            const updatedProfile = await wixData.update("Emergency_Profiles", profile, { suppressAuth: true });
+            console.log(`✅ Updated existing profile from subscription data:`, updatedProfile);
+        } else {
+            console.log(`🆕 CREATING NEW PROFILE`);
+            // Create new profile
+            const safeUUID = await generateSafeUUID();
+            console.log(`🔑 Generated safe UUID: ${safeUUID}`);
+            
+            const profileData = {
+                _owner: userId,
+                userId: userId,
+                emailAddress: email,
+                firstName: customer.first_name || '',
+                lastName: customer.last_name || '',
+                subscriptionPaid: isActive,
+                subscriptionActive: isActive,
+                planStatus: subscription.status,
+                membershipTier: planName,
+                paystackSubscriptionCode: subscription.subscription_code,
+                customer_code: customer.customer_code,
+                publicViewId: safeUUID,
+                dateCreated: new Date()
+            };
+            
+            console.log(`📋 Profile data to be inserted:`, profileData);
+            
+            const insertedProfile = await wixData.insert("Emergency_Profiles", profileData, { suppressAuth: true });
+            console.log(`✅ Created new profile from subscription data:`, insertedProfile);
+            console.log(`🎯 Final plan assignment: ${planName}`);
+        }
+    } catch (err) {
+        console.error("❌ upsertProfileFromSubscription error:", err.message);
+        throw err;
+    }
+}

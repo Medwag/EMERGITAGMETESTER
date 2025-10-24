@@ -1,0 +1,312 @@
+// ✅ backend/paystackUrl.jsw
+// ------------------------------------------------------------
+// Handles Paystack payment initialization and webhook event processing
+
+import { fetch } from 'wix-fetch';
+import wixData from 'wix-data';
+import wixSecretsBackend from 'wix-secrets-backend';
+import {
+  getPaystackSecretKey,
+  getCallbackUrl,
+  PAYSTACK_CONFIG,
+  getEnvironmentMode
+} from 'backend/paystack-config.jsw';
+import { sendDiscordLog } from 'backend/logger.jsw';
+import { sendEmailAlert } from 'backend/email.jsw';
+import { sendWhatsAppTemplate } from 'backend/whatsapp.jsw';
+
+// ------------------------------------------------------------
+// 1️⃣ Create Signup Payment (Initialization)
+// ------------------------------------------------------------
+export async function createSignupPayment(userId, email) {
+  const gateway = 'paystack';
+  const environment = await getEnvironmentMode();
+  const amount = 14900; // Paystack expects kobo (R149 = 14900)
+
+  try {
+    const secretKey = await getPaystackSecretKey();
+    if (!secretKey) throw new Error('Paystack Secret Key not configured.');
+
+    const callbackUrl = getCallbackUrl('signup');
+    const apiUrl = `${PAYSTACK_CONFIG.API_BASE_URL}/transaction/initialize`;
+
+    const initBody = {
+      email,
+      amount,
+      currency: PAYSTACK_CONFIG.CURRENCY || 'ZAR',
+      metadata: {
+        userId,
+        transaction_type: 'signup_fee',
+        environment
+      },
+      callback_url: callbackUrl
+    };
+
+    console.log(`🚀 [Paystack:${environment}] Initializing signup payment:`, initBody);
+
+    const res = await fetch(apiUrl, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${secretKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(initBody)
+    });
+
+    const result = await res.json();
+    console.log(`💳 [Paystack:${environment}] API response:`, result);
+
+    if (!res.ok || !result.status || !result.data?.authorization_url) {
+      throw new Error(result.message || 'Paystack initialization failed.');
+    }
+
+    const redirectUrl = result.data.authorization_url;
+
+    await wixData.insert('PaystackTransactions', {
+      _id: result.data.reference,
+      userId,
+      email,
+      gateway,
+      amount: amount / 100,
+      environment,
+      status: 'pending',
+      transactionType: 'signup_fee',
+      createdAt: new Date()
+    }, { suppressAuth: true });
+
+    await wixData.insert('PaymentAuditTrail', {
+      timestamp: new Date(),
+      userId,
+      gateway,
+      environment,
+      redirectUrl,
+      type: 'signup_payment',
+      status: 'initialized'
+    });
+
+    console.log(`✅ [Paystack:${environment}] Redirect URL:`, redirectUrl);
+    return { success: true, redirectUrl, gateway };
+  } catch (err) {
+    console.error(`💥 [Paystack:${environment}] Error creating payment:`, err);
+    await sendDiscordLog(`💥 Paystack initialization failed: ${err.message}`);
+    return { success: false, error: err.message, gateway };
+  }
+}
+
+// ------------------------------------------------------------
+// 2️⃣ Centralized Event Logging Helper
+// ------------------------------------------------------------
+async function logPaystackEvent(reference, eventType, status, payload, extra = {}) {
+  try {
+    await wixData.insert('PaystackTransactions', {
+      reference,
+      eventType,
+      status,
+      payload,
+      processedAt: new Date(),
+      ...extra
+    }, { suppressAuth: true });
+
+    await wixData.insert('PaymentAuditTrail', {
+      timestamp: new Date(),
+      gateway: 'paystack',
+      reference,
+      status,
+      eventType,
+      type: extra.transactionType || 'unspecified',
+      environment: extra.environment || 'live'
+    }, { suppressAuth: true });
+  } catch (err) {
+    console.warn(`⚠️ [Paystack] Failed to log ${eventType}:`, err.message);
+  }
+}
+
+// ------------------------------------------------------------
+// ✅ Successful Payment
+// ------------------------------------------------------------
+export async function handleSuccessfulTransaction(data) {
+  try {
+    const reference = data.reference || data.id || 'unknown';
+    const email = data.customer?.email || '';
+    const metadata = data.metadata || {};
+    const userId = metadata.userId || null;
+
+    console.log('💚 [Paystack] Successful charge:', reference);
+
+    await logPaystackEvent(reference, 'charge.success', 'success', data, {
+      email,
+      userId,
+      transactionType: metadata.transaction_type || 'generic',
+      environment: metadata.environment || 'live'
+    });
+
+    // ✅ Update user profile for signup payments
+    if (metadata.transaction_type === 'signup_fee' && userId) {
+      const result = await wixData.query('Emergency_Profiles')
+        .eq('_owner', userId)
+        .limit(1)
+        .find({ suppressAuth: true });
+      if (result.items.length > 0) {
+        const profile = result.items[0];
+        profile.signUpPaid = true;
+        profile.lastPaymentDate = new Date();
+        profile.paymentGateway = 'paystack';
+        await wixData.update('Emergency_Profiles', profile, { suppressAuth: true });
+        console.log(`✅ [Paystack] Profile updated for ${email}`);
+      }
+    }
+
+    // 📩 Send notifications
+    const message = `✅ Paystack payment successful for ${email} (Ref: ${reference})`;
+    await sendDiscordLog(message);
+    await sendEmailAlert({
+      subject: '💚 Paystack Payment Successful',
+      body: `${message}\nAmount: R${data.amount / 100}\nStatus: ${data.status}`,
+      to: 'support@emergitag.me'
+    });
+    await sendWhatsAppTemplate({
+      to: email,
+      templateName: 'payment_success',
+      parameters: { amount: `R${data.amount / 100}`, reference }
+    });
+
+    return true;
+  } catch (err) {
+    console.error('💥 handleSuccessfulTransaction error:', err);
+    await sendDiscordLog(`💥 handleSuccessfulTransaction failed: ${err.message}`);
+    return false;
+  }
+}
+
+// ------------------------------------------------------------
+// ❌ Failed Payment
+// ------------------------------------------------------------
+export async function handleFailedTransaction(data) {
+  const reference = data.reference || 'unknown';
+  const email = data.customer?.email || '';
+  console.warn('❌ [Paystack] Failed charge for', reference);
+
+  await logPaystackEvent(reference, 'charge.failed', 'failed', data, { email });
+  await sendDiscordLog(`❌ Paystack failed transaction for ${email}`);
+
+  await sendEmailAlert({
+    subject: '⚠️ Paystack Payment Failed',
+    body: `A payment attempt by ${email} has failed.\nReference: ${reference}`,
+    to: 'support@emergitag.me'
+  });
+}
+
+// ------------------------------------------------------------
+// ⚖️ Dispute Event
+// ------------------------------------------------------------
+export async function handleDispute(data) {
+  const reference = data.reference || 'unknown';
+  const email = data.customer?.email || '';
+  console.log('⚖️ [Paystack] Dispute received:', reference);
+
+  await logPaystackEvent(reference, 'charge.dispute.create', 'dispute', data, { email });
+  await sendDiscordLog(`⚖️ Dispute created for ${email}`);
+
+  await sendEmailAlert({
+    subject: '⚖️ Paystack Dispute Alert',
+    body: `A dispute was created for ${email}.\nReference: ${reference}`,
+    to: 'support@emergitag.me'
+  });
+}
+
+// ------------------------------------------------------------
+// 📴 Subscription Disabled
+// ------------------------------------------------------------
+export async function handleSubscriptionDisable(data) {
+  const subscriptionCode = data.subscription_code || 'unknown';
+  const email = data.customer?.email || '';
+  console.log('🚫 [Paystack] Subscription disabled:', subscriptionCode);
+
+  await logPaystackEvent(subscriptionCode, 'subscription.disable', 'disabled', data, { email });
+  await sendDiscordLog(`🚫 Subscription disabled for ${email}`);
+
+  await sendEmailAlert({
+    subject: '🚫 Subscription Disabled',
+    body: `Subscription for ${email} has been disabled.\nCode: ${subscriptionCode}`,
+    to: 'support@emergitag.me'
+  });
+}
+
+// ------------------------------------------------------------
+// 💵 Subscription Payment
+// ------------------------------------------------------------
+export async function handleSubscriptionPayment(data) {
+  const reference = data.reference || 'unknown';
+  const email = data.customer?.email || '';
+  const amount = data.amount / 100;
+  const plan = data.plan?.name || 'Unknown Plan';
+
+  console.log(`💰 [Paystack] Subscription payment received (${plan}) for ${email}`);
+
+  await logPaystackEvent(reference, 'subscription.payment', 'success', data, {
+    email,
+    plan
+  });
+
+  const msg = `💰 Subscription payment success for ${email} (${plan}) - R${amount}`;
+  await sendDiscordLog(msg);
+  await sendEmailAlert({ subject: '💰 Subscription Payment', body: msg, to: 'support@emergitag.me' });
+  await sendWhatsAppTemplate({ to: email, templateName: 'subscription_success', parameters: { plan, amount } });
+}
+
+// ------------------------------------------------------------
+// 🌱 First Payment Success (Trial Conversion)
+// ------------------------------------------------------------
+export async function handleFirstPaymentSuccess(data) {
+  const reference = data.reference || 'unknown';
+  const email = data.customer?.email || '';
+  console.log('🌱 [Paystack] First payment success for', email);
+
+  await logPaystackEvent(reference, 'first.payment.success', 'success', data, { email });
+  const msg = `🌱 First payment success for ${email}`;
+  await sendDiscordLog(msg);
+  await sendEmailAlert({ subject: '🌱 First Payment Success', body: msg, to: 'support@emergitag.me' });
+}
+
+// ------------------------------------------------------------
+// 🟢 Sign-Up Payment Success (One-Time Signup Fee)
+// ------------------------------------------------------------
+export async function handleSignUpPaymentSuccess(data) {
+  const reference = data.reference || 'unknown';
+  const email = data.customer?.email || '';
+  const metadata = data.metadata || {};
+  const userId = metadata.userId || null;
+
+  console.log('🟢 [Paystack] Signup payment success for', email);
+
+  await logPaystackEvent(reference, 'signup.payment.success', 'success', data, {
+    email,
+    userId,
+    transactionType: 'signup_fee'
+  });
+
+  if (userId) {
+    try {
+      const result = await wixData.query('Emergency_Profiles')
+        .eq('_owner', userId)
+        .limit(1)
+        .find({ suppressAuth: true });
+      if (result.items.length > 0) {
+        const profile = result.items[0];
+        profile.signUpPaid = true;
+        profile.lastPaymentDate = new Date();
+        profile.paymentGateway = 'paystack';
+        await wixData.update('Emergency_Profiles', profile, { suppressAuth: true });
+        console.log(`✅ [Paystack] Sign-up marked paid for ${email}`);
+      }
+    } catch (err) {
+      console.error('💥 Failed to update profile on signup success:', err);
+      await sendDiscordLog(`💥 Signup profile update failed for ${email}: ${err.message}`);
+    }
+  }
+
+  const msg = `✅ Signup payment success for ${email} (R${data.amount / 100})`;
+  await sendDiscordLog(msg);
+  await sendEmailAlert({ subject: '🟢 Signup Payment Success', body: msg, to: 'support@emergitag.me' });
+  await sendWhatsAppTemplate({ to: email, templateName: 'signup_payment_success', parameters: { amount: `R${data.amount / 100}`, reference } });
+}

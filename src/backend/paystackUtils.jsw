@@ -1,0 +1,134 @@
+// ✅ backend/paystack-utils.jsw
+// EmergiTag.me — Paystack Utility Functions
+// Handles subscription activation, updates, and plan syncing logic.
+
+import wixData from 'wix-data';
+import { logPaystackEvent } from 'backend/paystackSubscriptionWithCustomer.jsw';
+
+/**
+ * Handle Paystack subscription or recurring charge success.
+ * This runs automatically when events like charge.success,
+ * invoice.update, or subscription.create are received.
+ *
+ * @param {Object} data - Paystack webhook data object
+ */
+export async function handleSubscriptionPayment(data) {
+  try {
+    const userId = data?.metadata?.userId || null;
+    const planTier = data?.metadata?.planTier || 'Unknown';
+    const billingCycle = data?.metadata?.billingCycle || 'Unknown';
+    const email = data?.customer?.email || data?.metadata?.email || 'unknown';
+    const amount = (data?.amount || 0) / 100;
+    const reference = data?.reference || `ref-${Date.now()}`;
+
+    if (!userId) {
+      console.warn('⚠️ [handleSubscriptionPayment] Missing userId in metadata');
+      return { success: false, message: 'Missing userId in metadata' };
+    }
+
+    // 🔍 Locate Emergency Profile by userId (_owner)
+    const profileRes = await wixData
+      .query('Emergency_Profiles')
+      .eq('_owner', userId)
+      .limit(1)
+      .find({ suppressAuth: true });
+
+    if (!profileRes.items.length) {
+      console.warn(`⚠️ No Emergency_Profiles found for user ${userId}`);
+      await logPaystackEvent({
+        userId,
+        email,
+        eventType: 'subscription_payment',
+        status: 'failed',
+        message: 'No Emergency_Profiles record found',
+        reference
+      });
+      return { success: false, message: 'No Emergency_Profiles found' };
+    }
+
+    const profile = profileRes.items[0];
+
+    // 🧾 Update key subscription fields
+    profile.membershipTier = planTier;
+    profile.subscriptionActive = true;
+    profile.planStatus = 'active';
+    profile.lastPaymentAmount = amount;
+    profile.lastPaymentDate = new Date();
+    profile.lastPaymentReference = reference;
+    profile.paymentProvider = 'paystack';
+    profile.billingCycle = billingCycle;
+    profile.lastUpdated = new Date();
+
+    await wixData.update('Emergency_Profiles', profile, { suppressAuth: true });
+    console.log(`✅ [handleSubscriptionPayment] Updated profile for ${email}`);
+
+    // 🪵 Log event
+    await logPaystackEvent({
+      userId,
+      email,
+      eventType: 'subscription_payment',
+      planTier,
+      billingCycle,
+      status: 'success',
+      message: `Subscription payment processed for ${planTier} (${billingCycle})`,
+      reference,
+      customerCode: data?.customer?.customer_code || null,
+      eventPayload: data
+    });
+
+    return { success: true, message: 'Subscription payment handled successfully' };
+  } catch (err) {
+    console.error('💥 [handleSubscriptionPayment] Error:', err);
+    await logPaystackEvent({
+      eventType: 'subscription_payment_error',
+      status: 'failed',
+      message: err.message || 'Unhandled error in handleSubscriptionPayment'
+    });
+    return { success: false, message: err.message };
+  }
+}
+
+/**
+ * Optional utility for forced deactivation of subscriptions.
+ * Used when a webhook event marks the subscription as disabled.
+ */
+export async function disableSubscriptionByEmail(email) {
+  try {
+    const res = await wixData
+      .query('Emergency_Profiles')
+      .eq('email', email)
+      .limit(1)
+      .find({ suppressAuth: true });
+
+    if (!res.items.length) {
+      console.warn(`⚠️ No profile found for ${email}`);
+      return { success: false, message: 'No profile found' };
+    }
+
+    const profile = res.items[0];
+    profile.subscriptionActive = false;
+    profile.planStatus = 'disabled';
+    profile.lastUpdated = new Date();
+
+    await wixData.update('Emergency_Profiles', profile, { suppressAuth: true });
+    console.log(`⚠️ [disableSubscriptionByEmail] Disabled subscription for ${email}`);
+
+    await logPaystackEvent({
+      email,
+      eventType: 'subscription.disable',
+      status: 'success',
+      message: 'Subscription manually disabled via utility'
+    });
+
+    return { success: true, message: 'Subscription disabled successfully' };
+  } catch (err) {
+    console.error('💥 [disableSubscriptionByEmail] Error:', err);
+    await logPaystackEvent({
+      email,
+      eventType: 'subscription.disable_error',
+      status: 'failed',
+      message: err.message
+    });
+    return { success: false, message: err.message };
+  }
+}

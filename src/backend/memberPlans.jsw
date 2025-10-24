@@ -1,0 +1,53 @@
+import wixUsers from 'wix-users-backend'; // Use wix-users-backend for backend operations
+import wixData from 'wix-data';
+
+/**
+ * Retrieves the current member's plan and returns visibility flags for dashboard sections.
+ * @returns {Promise<Object>} An object containing boolean flags for element visibility.
+ */
+export async function getDashboardVisibility() {
+    const defaultVisibility = {
+        showBronzeSummary: false,
+        showSilverSummary: false,
+        showGoldSummaries: false,
+        showMessageSilverUpgrade: false,
+        showMessageGoldUpgrade: false
+    };
+
+    if (!wixUsers.currentUser.loggedIn) {
+        // If not logged in, return defaults (or direct to login if preferred)
+        return defaultVisibility;
+    }
+
+    const userId = wixUsers.currentUser.id;
+
+    try {
+        const results = await wixData.query("Emergency_Profiles")
+            .eq("membershipTier", userId)
+            .find();
+
+        const planItem = results.items[0];
+
+        if (planItem) {
+            const planName = planItem.planName;
+
+            defaultVisibility.showBronzeSummary = true; // Bronze summary is always shown if a plan exists
+
+            if (planName === 'Bronze') {
+                defaultVisibility.showMessageSilverUpgrade = true;
+                defaultVisibility.showMessageGoldUpgrade = true;
+            } else if (planName === 'Silver') {
+                defaultVisibility.showSilverSummary = true;
+                defaultVisibility.showMessageGoldUpgrade = true;
+            } else if (planName === 'Gold') {
+                defaultVisibility.showSilverSummary = true;
+                defaultVisibility.showGoldSummaries = true;
+            }
+        }
+    } catch (error) {
+        console.error("Backend Error: Failed to get dashboard visibility:", error);
+        // In case of an error, return default or handle as needed
+    }
+
+    return defaultVisibility;
+}

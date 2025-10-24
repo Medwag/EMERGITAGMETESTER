@@ -1,0 +1,97 @@
+// Emergency diagnostic function for PayFast 500 errors
+export async function diagnosePayFastIssue() {
+  console.log('🔍 PayFast Diagnostic Check');
+  console.log('===========================');
+  
+  try {
+    // Test 1: Check if config module loads
+    console.log('1. Testing PayFast config import...');
+    const { getPayFastConfig } = await import('./payfast-config.jsw');
+    console.log('✅ Config import successful');
+    
+    // Test 2: Check if config can be instantiated
+    console.log('2. Testing config instantiation...');
+    const config = await getPayFastConfig();
+    console.log('✅ Config instantiation successful');
+    
+    // Test 3: Check credentials access (safely)
+    console.log('3. Testing credential access...');
+    try {
+      const credentials = config.getCredentials();
+      console.log('✅ Credentials access successful');
+      
+      // Test 4: Check if credentials resolve
+      console.log('4. Testing credential resolution...');
+      const merchantId = await Promise.resolve(credentials.merchantId);
+      const merchantKey = await Promise.resolve(credentials.merchantKey);
+      
+      console.log('✅ Credential resolution successful:', {
+        merchantId: merchantId ? 'present' : 'missing',
+        merchantKey: merchantKey ? 'present' : 'missing'
+      });
+      
+      return {
+        success: true,
+        status: 'PayFast configuration appears healthy',
+        credentials: {
+          merchantId: !!merchantId,
+          merchantKey: !!merchantKey
+        }
+      };
+      
+    } catch (credError) {
+      console.error('❌ Credential access failed:', credError.message);
+      return {
+        success: false,
+        error: 'Credential access failed',
+        details: credError.message
+      };
+    }
+    
+  } catch (importError) {
+    console.error('❌ Module import failed:', importError.message);
+    return {
+      success: false,
+      error: 'Module import failed', 
+      details: importError.message
+    };
+  }
+}
+
+// Safe parameter creation function with comprehensive error handling
+export async function createPayFastSignupParamsSafe(userId, email, amount = 149.00) {
+  console.log('[PayFast Safe] Creating parameters with error handling...');
+  
+  try {
+    // First run diagnostic
+    const diagnostic = await diagnosePayFastIssue();
+    if (!diagnostic.success) {
+      throw new Error(`PayFast diagnostic failed: ${diagnostic.error} - ${diagnostic.details}`);
+    }
+    
+    // If diagnostic passes, proceed with normal parameter creation
+    const { createPayFastSignupParams } = await import('./payfastUtils.jsw');
+    const params = await createPayFastSignupParams(userId, email, amount);
+    
+    console.log('✅ Safe parameter creation successful');
+    return params;
+    
+  } catch (error) {
+    console.error('❌ Safe parameter creation failed:', error.message);
+    
+    // Return minimal working parameters as fallback
+    return {
+      merchant_id: 10000100, // Use sandbox merchant ID
+      merchant_key: '46f0cd694581a', // Use sandbox merchant key
+      amount: Number(amount).toFixed(2),
+      item_name: 'EmergiTag Signup Fee',
+      email_address: String(email || 'billing@emergitag.me'),
+      return_url: 'https://www.emergitag.me/signup-success',
+      cancel_url: 'https://www.emergitag.me/signup-cancelled', 
+      notify_url: 'https://www.emergitag.me/_functions/payfastWebhook',
+      name_first: 'EmergiTag',
+      name_last: 'Member',
+      m_payment_id: `SIGNUP_${userId}_${Date.now()}`
+    };
+  }
+}

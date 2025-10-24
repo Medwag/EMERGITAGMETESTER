@@ -1,0 +1,58 @@
+// EMERGENCY: Ultra-minimal PayFast that bypasses ALL other files
+// This should work even if every other PayFast file is broken
+
+import { getSecret } from 'wix-secrets-backend';
+
+export async function emergencyPayFastUrl() {
+  console.log('🚨 EMERGENCY PayFast function called');
+  
+  try {
+    // Get actual credentials but force sandbox URL for testing
+    let merchantId, merchantKey;
+    try {
+      merchantId = await getSecret('payfast_merchant_id') || '10000100';
+      merchantKey = await getSecret('payfast_merchant_key') || '46f0cd694581a';
+    } catch (error) {
+      console.log('Using fallback credentials');
+      merchantId = '10000100';
+      merchantKey = '46f0cd694581a';
+    }
+    
+    // FORCE SANDBOX URL to avoid PayFast "glitch" error
+    const testUrl = 'https://sandbox.payfast.co.za/eng/process?' +
+      `merchant_id=${merchantId}&` +
+      `merchant_key=${merchantKey}&` +
+      'amount=149.00&' +
+      'item_name=EmergiTag+Signup+Fee&' +
+      'return_url=https://www.emergitag.me/signup-success&' +
+      'cancel_url=https://www.emergitag.me/signup-cancelled&' +
+      'notify_url=https://www.emergitag.me/_functions/payfastWebhook&' +
+      'name_first=EmergiTag&' +
+      'name_last=Member&' +
+      'email_address=billing@emergitag.me&' +
+      'm_payment_id=EMERGENCY_' + Date.now();
+    
+    console.log('🚨 Emergency PayFast URL generated');
+    
+    return {
+      success: true,
+      redirectUrl: testUrl,
+      gateway: 'payfast',
+      note: 'EMERGENCY: Using hardcoded test URL'
+    };
+    
+  } catch (error) {
+    console.error('🚨 Emergency PayFast failed:', error);
+    return {
+      success: false,
+      error: error.message,
+      gateway: 'payfast'
+    };
+  }
+}
+
+// Test function that requires no imports
+export function testEmergencyFunction() {
+  console.log('🧪 Emergency test function works');
+  return { working: true, timestamp: new Date().toISOString() };
+}

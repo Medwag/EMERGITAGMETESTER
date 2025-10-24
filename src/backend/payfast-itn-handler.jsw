@@ -1,0 +1,378 @@
+// ✅ backend/payfast-itn-handler.jsw
+// Enhanced PayFast ITN (Instant Transaction Notification) Handler for EmergiTag
+import { getPayFastConfig } from 'backend/payfast-config.jsw';
+import { parsePayFastITN, validatePayFastParams, validatePayFastIpAddress } from 'backend/payfastUtils.jsw';
+import { syncPayFastPayment } from 'backend/subscription-utils.jsw';
+import wixData from 'wix-data';
+
+/**
+ * Enhanced PayFast ITN handler for processing instant transaction notifications
+ * @param {object} itnData - Raw ITN data received from PayFast
+ * @param {string} sourceIp - Source IP address of the request
+ * @returns {Promise<object>} Processing result with status and details
+ */
+export async function handlePayFastITN(itnData, sourceIp = '') {
+    const startTime = Date.now();
+    console.log(`🚀 [PayFast ITN] Processing ITN notification`);
+    console.log(`[PayFast ITN] Source IP: ${sourceIp}`);
+    console.log(`[PayFast ITN] ITN Data keys: ${Object.keys(itnData || {}).join(', ')}`);
+
+    try {
+        // Step 1: Validate source IP (if provided)
+        if (sourceIp) {
+            const ipValidation = validatePayFastIpAddress(sourceIp);
+            if (!ipValidation.isValid) {
+                console.warn(`⚠️ [PayFast ITN] Invalid source IP: ${sourceIp}`);
+                return {
+                    success: false,
+                    error: 'Invalid source IP address',
+                    details: ipValidation,
+                    processingTime: Date.now() - startTime
+                };
+            }
+            console.log(`✅ [PayFast ITN] IP validation passed: ${sourceIp}`);
+        }
+
+        // Step 2: Parse and validate ITN data
+        const parseResult = parsePayFastITN(itnData);
+        if (!parseResult.isValid) {
+            console.error(`❌ [PayFast ITN] ITN parsing failed:`, parseResult.errors);
+            return {
+                success: false,
+                error: 'ITN parsing failed',
+                details: parseResult,
+                processingTime: Date.now() - startTime
+            };
+        }
+
+        const parsedData = parseResult.data;
+        console.log(`📋 [PayFast ITN] Parsed ITN data:`, {
+            paymentId: parsedData.m_payment_id,
+            paymentStatus: parsedData.payment_status,
+            amount: parsedData.amount_gross,
+            userId: parsedData.custom_str1
+        });
+
+        // Step 3: Validate signature
+        const config = await getPayFastConfig();
+        const { passphrase } = config.getCredentials();
+        
+        const validationResult = await validatePayFastParams(parsedData, passphrase);
+        if (!validationResult.isValid) {
+            console.error(`❌ [PayFast ITN] Signature validation failed:`, validationResult.details);
+            await logITNError('signature_validation_failed', parsedData, validationResult);
+            return {
+                success: false,
+                error: 'Signature validation failed',
+                details: validationResult,
+                processingTime: Date.now() - startTime
+            };
+        }
+        console.log(`🔐 [PayFast ITN] Signature validation passed`);
+
+        // Step 4: Process based on payment status
+        const processingResult = await processPaymentStatus(parsedData);
+        
+        console.log(`✅ [PayFast ITN] ITN processing completed in ${Date.now() - startTime}ms`);
+        
+        return {
+            success: true,
+            paymentId: parsedData.m_payment_id,
+            status: parsedData.payment_status,
+            processingResult,
+            processingTime: Date.now() - startTime
+        };
+
+    } catch (error) {
+        console.error(`❌ [PayFast ITN] ITN processing error:`, error);
+        
+        // Log error for analysis
+        await logITNError('processing_error', itnData, { error: error.message });
+        
+        return {
+            success: false,
+            error: error.message,
+            processingTime: Date.now() - startTime
+        };
+    }
+}
+
+/**
+ * Process payment based on status
+ * @param {object} parsedData - Validated and parsed ITN data
+ * @returns {Promise<object>} Processing result
+ */
+async function processPaymentStatus(parsedData) {
+    const { payment_status, m_payment_id, custom_str1: userId, custom_str4: paymentType } = parsedData;
+    
+    console.log(`🔄 [PayFast ITN] Processing payment status: ${payment_status} for type: ${paymentType}`);
+
+    switch (payment_status) {
+        case 'COMPLETE':
+            return await processCompletePayment(parsedData);
+            
+        case 'FAILED':
+            return await processFailedPayment(parsedData);
+            
+        case 'CANCELLED':
+            return await processCancelledPayment(parsedData);
+            
+        default:
+            console.warn(`⚠️ [PayFast ITN] Unknown payment status: ${payment_status}`);
+            return {
+                action: 'logged',
+                status: payment_status,
+                message: `Unknown payment status processed: ${payment_status}`
+            };
+    }
+}
+
+/**
+ * Process completed payment
+ * @param {object} parsedData - Validated ITN data
+ * @returns {Promise<object>} Processing result
+ */
+async function processCompletePayment(parsedData) {
+    const { m_payment_id, custom_str1: userId, custom_str4: paymentType, amount_gross } = parsedData;
+    
+    console.log(`✅ [PayFast ITN] Processing completed payment: ${m_payment_id}`);
+
+    try {
+        // Handle different payment types
+        if (paymentType === 'signup') {
+            // Process signup payment
+            const syncResult = await syncPayFastPayment(parsedData, 'completed');
+            
+            // Update user profile with signup payment status
+            await updateUserSignupStatus(userId, {
+                signUpPaid: true,
+                signUpReference: m_payment_id,
+                joinedDate: new Date(),
+                paymentProvider: 'payfast',
+                paymentAmount: parseFloat(amount_gross)
+            });
+            
+            console.log(`🎉 [PayFast ITN] Signup payment completed for user: ${userId}`);
+            
+            // Send WhatsApp and email notifications after confirmed payment
+            try {
+                const { sendPostPaymentNotifications } = await import('./profile-utils.jsw');
+                await sendPostPaymentNotifications(userId, m_payment_id);
+                console.log(`📱 [PayFast ITN] Post-payment notifications sent for user: ${userId}`);
+            } catch (notificationError) {
+                console.error(`❌ [PayFast ITN] Failed to send post-payment notifications:`, notificationError);
+                // Don't throw - payment processing should continue even if notifications fail
+            }
+            
+            return {
+                action: 'signup_completed',
+                userId,
+                paymentId: m_payment_id,
+                amount: amount_gross,
+                syncResult
+            };
+            
+        } else if (paymentType === 'subscription') {
+            // Process subscription payment
+            const syncResult = await syncPayFastPayment(parsedData, 'completed');
+            
+            console.log(`🔄 [PayFast ITN] Subscription payment completed for user: ${userId}`);
+            
+            return {
+                action: 'subscription_completed',
+                userId,
+                paymentId: m_payment_id,
+                amount: amount_gross,
+                syncResult
+            };
+            
+        } else {
+            // Generic payment processing
+            const syncResult = await syncPayFastPayment(parsedData, 'completed');
+            
+            return {
+                action: 'payment_completed',
+                paymentType: paymentType || 'unknown',
+                userId,
+                paymentId: m_payment_id,
+                syncResult
+            };
+        }
+        
+    } catch (error) {
+        console.error(`❌ [PayFast ITN] Error processing completed payment:`, error);
+        throw error;
+    }
+}
+
+/**
+ * Process failed payment
+ * @param {object} parsedData - Validated ITN data
+ * @returns {Promise<object>} Processing result
+ */
+async function processFailedPayment(parsedData) {
+    const { m_payment_id, custom_str1: userId, custom_str4: paymentType } = parsedData;
+    
+    console.log(`❌ [PayFast ITN] Processing failed payment: ${m_payment_id}`);
+
+    try {
+        // Sync failed payment status
+        const syncResult = await syncPayFastPayment(parsedData, 'failed');
+        
+        // Update user status if it was a signup payment
+        if (paymentType === 'signup') {
+            await updateUserSignupStatus(userId, {
+                signUpPaid: false,
+                signUpReference: `FAILED_${m_payment_id}`,
+                paymentProvider: 'payfast',
+                paymentStatus: 'failed'
+            });
+        }
+        
+        return {
+            action: 'payment_failed',
+            userId,
+            paymentId: m_payment_id,
+            paymentType,
+            syncResult
+        };
+        
+    } catch (error) {
+        console.error(`❌ [PayFast ITN] Error processing failed payment:`, error);
+        throw error;
+    }
+}
+
+/**
+ * Process cancelled payment
+ * @param {object} parsedData - Validated ITN data
+ * @returns {Promise<object>} Processing result
+ */
+async function processCancelledPayment(parsedData) {
+    const { m_payment_id, custom_str1: userId, custom_str4: paymentType } = parsedData;
+    
+    console.log(`🚫 [PayFast ITN] Processing cancelled payment: ${m_payment_id}`);
+
+    try {
+        // Sync cancelled payment status
+        const syncResult = await syncPayFastPayment(parsedData, 'cancelled');
+        
+        return {
+            action: 'payment_cancelled',
+            userId,
+            paymentId: m_payment_id,
+            paymentType,
+            syncResult
+        };
+        
+    } catch (error) {
+        console.error(`❌ [PayFast ITN] Error processing cancelled payment:`, error);
+        throw error;
+    }
+}
+
+/**
+ * Update user signup status in Emergency_Profiles
+ * @param {string} userId - User ID
+ * @param {object} updateData - Data to update
+ * @returns {Promise<void>}
+ */
+async function updateUserSignupStatus(userId, updateData) {
+    try {
+        console.log(`📝 [PayFast ITN] Updating user signup status for: ${userId}`);
+        
+        const profileQuery = await wixData.query('Emergency_Profiles')
+            .eq('userId', userId)
+            .find();
+            
+        if (profileQuery.items.length > 0) {
+            const profile = profileQuery.items[0];
+            const updatedProfile = {
+                ...profile,
+                ...updateData,
+                lastUpdated: new Date()
+            };
+            
+            await wixData.update('Emergency_Profiles', updatedProfile);
+            console.log(`✅ [PayFast ITN] User profile updated successfully: ${userId}`);
+        } else {
+            console.warn(`⚠️ [PayFast ITN] No profile found for user: ${userId}`);
+        }
+        
+    } catch (error) {
+        console.error(`❌ [PayFast ITN] Error updating user signup status:`, error);
+        throw error;
+    }
+}
+
+/**
+ * Log ITN errors for analysis
+ * @param {string} errorType - Type of error
+ * @param {object} itnData - Original ITN data
+ * @param {object} errorDetails - Error details
+ * @returns {Promise<void>}
+ */
+async function logITNError(errorType, itnData, errorDetails) {
+    try {
+        const errorLog = {
+            errorType,
+            timestamp: new Date(),
+            itnData: JSON.stringify(itnData),
+            errorDetails: JSON.stringify(errorDetails),
+            source: 'payfast_itn_handler'
+        };
+        
+        // Store in a logging collection (if exists)
+        // await wixData.save('Payment_Errors', errorLog);
+        
+        console.error(`[PayFast ITN Error Log] ${errorType}:`, errorLog);
+        
+    } catch (error) {
+        console.error(`❌ [PayFast ITN] Failed to log error:`, error);
+    }
+}
+
+/**
+ * Process PayFast webhook from HTTP function
+ * @param {object} request - HTTP request object
+ * @returns {Promise<object>} Response object
+ */
+export async function processPayFastWebhook(request) {
+    try {
+        console.log(`🌐 [PayFast Webhook] Processing webhook request`);
+        
+        const itnData = request.body;
+        const sourceIp = request.headers['x-forwarded-for'] || request.ip;
+        
+        const result = await handlePayFastITN(itnData, sourceIp);
+        
+        if (result.success) {
+            return {
+                status: 200,
+                body: 'OK',
+                headers: {
+                    'Content-Type': 'text/plain'
+                }
+            };
+        } else {
+            console.warn(`⚠️ [PayFast Webhook] ITN processing failed:`, result);
+            return {
+                status: 400,
+                body: 'ERROR',
+                headers: {
+                    'Content-Type': 'text/plain'
+                }
+            };
+        }
+        
+    } catch (error) {
+        console.error(`❌ [PayFast Webhook] Webhook processing error:`, error);
+        return {
+            status: 500,
+            body: 'ERROR',
+            headers: {
+                'Content-Type': 'text/plain'
+            }
+        };
+    }
+}

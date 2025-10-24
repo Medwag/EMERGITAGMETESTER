@@ -1,0 +1,33 @@
+import { getSecret } from 'wix-secrets-backend';
+import { fetch } from 'wix-fetch';
+
+export async function getPaypalSubscriptions() {
+  const clientId = await getSecret("paypalClientId");
+  const clientSecret = await getSecret("paypalClientSecret");
+
+  // Get Access Token
+  const tokenUrl = 'https://api.paypal.com/v1/oauth2/token';
+  const tokenResponse = await fetch(tokenUrl, {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Basic ' + btoa(`${clientId}:${clientSecret}`),
+      'Content-Type': 'application/x-www-form-urlencoded'
+    },
+    body: 'grant_type=client_credentials'
+  });
+  const tokenData = await tokenResponse.json();
+  const accessToken = tokenData.access_token;
+
+  // Fetch subscriptions
+  const subscriptionsUrl = 'https://api.paypal.com/v1/billing/subscriptions';
+  const subscriptionsResponse = await fetch(subscriptionsUrl, {
+    method: 'GET',
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'Content-Type': 'application/json'
+    }
+  });
+
+  const subscriptionsData = await subscriptionsResponse.json();
+  return subscriptionsData.subscriptions;
+}

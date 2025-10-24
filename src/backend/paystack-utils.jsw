@@ -1,0 +1,328 @@
+// backend/paystack-utils.jsw
+// ✅ Static-import, Wix-compatible utilities for Paystack
+
+import wixData from 'wix-data';
+import { fetch } from 'wix-fetch';
+import { getPaystackSecretKey, PAYSTACK_CONFIG, getPaystackWebhookSecret } from 'backend/paystack-config.jsw';
+import { createHmac, randomUUID as cryptoRandomUUID } from 'crypto'; // static crypto import
+
+// NOTE: Notifications are optional. If you have backend/profile-utils.jsw with
+// export async function sendPostPaymentNotifications(userId, reference) { ... }
+// you can UNCOMMENT the import below. If the file doesn't exist, leave it commented.
+// import { sendPostPaymentNotifications } from 'backend/profile-utils.jsw';
+
+/* -------------------------------------------------------------------------- */
+/* Helpers                                                                     */
+/* -------------------------------------------------------------------------- */
+function safeRandomId() {
+  try {
+    if (typeof cryptoRandomUUID === 'function') return cryptoRandomUUID();
+  } catch (_) { /* ignore */ }
+  // Fallback UUID-ish
+  return `emergitag-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/* -------------------------------------------------------------------------- */
+/* 🔎 Verify a Paystack transaction by reference                               */
+/* -------------------------------------------------------------------------- */
+export async function verifyPaystackPayment(reference) {
+  try {
+    if (!reference || typeof reference !== 'string') {
+      return { success: false, error: 'Valid transaction reference is required' };
+    }
+    if (reference.length < 10) {
+      return { success: false, error: 'Invalid transaction reference format' };
+    }
+
+    console.log(`🔍 Verifying Paystack payment: ${reference}`);
+
+    const secretKey = await getPaystackSecretKey();
+    const url = `${PAYSTACK_CONFIG.API_BASE_URL}/transaction/verify/${reference}`;
+
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${secretKey}`,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    if (!response.ok) {
+      const errorMsg = `Paystack API error: ${response.status} ${response.statusText}`;
+      console.error(`❌ ${errorMsg}`);
+      return { success: false, error: errorMsg };
+    }
+
+    const result = await response.json();
+    if (!result.status) {
+      console.error('❌ Paystack verification failed:', result.message);
+      return { success: false, error: result.message || 'Verification failed' };
+    }
+
+    const tx = result.data;
+    console.log(`📊 Transaction status: ${tx.status}, Amount: ${tx.amount}, Reference: ${reference}`);
+
+    if (tx.status === 'success') {
+      return {
+        success: true,
+        data: tx,
+        reference,
+        amount: tx.amount,
+        customer: tx.customer,
+        metadata: tx.metadata
+      };
+    } else {
+      const errorMsg = tx.gateway_response || `Payment ${tx.status}`;
+      console.warn(`⚠️ Payment not successful: ${errorMsg}`);
+      return {
+        success: false,
+        error: errorMsg,
+        data: tx,
+        status: tx.status
+      };
+    }
+  } catch (err) {
+    console.error('❌ verifyPaystackPayment error:', err.message);
+    return {
+      success: false,
+      error: `Verification failed: ${err.message}`,
+      reference
+    };
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* 🧩 Create or update Emergency_Profiles from Paystack data                   */
+/* -------------------------------------------------------------------------- */
+export async function upsertEmergencyProfile(paystackData) {
+  try {
+    const { customer, reference, metadata } = paystackData;
+    const email = customer?.email;
+    // We always key lookups by _owner in your site; still store userId for convenience
+    const userId = metadata?.userId || customer?.id;
+    const membershipTier = metadata?.membershipTier || metadata?.planName || '';
+
+    if (!email) throw new Error('Customer email missing from Paystack data.');
+    if (!userId) throw new Error('User ID missing from Paystack metadata.');
+
+    console.log(`📝 Upserting profile for userId: ${userId}, email: ${email}`);
+
+    const existing = await wixData.query('Emergency_Profiles')
+      .eq('_owner', userId)
+      .limit(1)
+      .find({ suppressAuth: true });
+
+    let publicViewId = existing.items[0]?.publicViewId || safeRandomId();
+
+    const profileData = {
+      userId, // keep for convenience/search; _owner is the canonical relation
+      emailAddress: email,
+      membershipTier,
+      signUpPaid: true,
+      paystackRef: reference,
+      datePaid: new Date(),
+      lastPaymentDate: new Date(),
+      planStatus: 'active',
+      publicViewId
+    };
+
+    let result;
+    if (existing.items.length > 0) {
+      const updatedData = {
+        ...existing.items[0],
+        ...profileData,
+        _id: existing.items[0]._id
+      };
+      result = await wixData.update('Emergency_Profiles', updatedData, { suppressAuth: true });
+      console.log(`✅ Updated existing profile for ${email}`);
+    } else {
+      result = await wixData.insert('Emergency_Profiles', profileData, { suppressAuth: true });
+      console.log(`✅ Created new profile for ${email}`);
+    }
+
+    return result;
+  } catch (err) {
+    console.error('❌ upsertEmergencyProfile error:', err.message);
+    throw new Error(`Profile upsert failed: ${err.message}`);
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* 👤 Get or create a Paystack customer, persist customer_code in CMS         */
+/* -------------------------------------------------------------------------- */
+export async function getOrCreatePaystackCustomer(userId, email, firstName = '', lastName = '', phone = null) {
+  try {
+    if (!userId || !email) throw new Error('User ID and email are required');
+    console.log(`👤 [Paystack] Looking up or creating customer for: ${email}`);
+
+    // 1) Check local CMS (by _owner)
+    const profileQuery = await wixData.query('Emergency_Profiles')
+      .eq('_owner', userId)
+      .limit(1)
+      .find({ suppressAuth: true });
+
+    let profile = profileQuery.items[0] || null;
+
+    if (profile?.paystackCustomerCode) {
+      console.log(`✅ Existing Paystack customer_code found: ${profile.paystackCustomerCode}`);
+      return profile.paystackCustomerCode;
+    }
+
+    // 2) Check Paystack API by email
+    const secretKey = await getPaystackSecretKey();
+    const searchResp = await fetch(
+      `https://api.paystack.co/customer?email=${encodeURIComponent(email)}`,
+      {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${secretKey}`,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    const searchData = await searchResp.json();
+    let customerCode = null;
+
+    if (searchData?.status && Array.isArray(searchData.data) && searchData.data.length > 0) {
+      customerCode = searchData.data[0].customer_code;
+      console.log(`✅ Found existing Paystack customer on Paystack API: ${customerCode}`);
+    } else {
+      // 3) Create new customer
+      const customerData = {
+        email,
+        first_name: firstName || 'Member',
+        last_name: lastName || '',
+        ...(phone ? { phone } : {}),
+        metadata: { userId }
+      };
+
+      const createResp = await fetch(`${PAYSTACK_CONFIG.API_BASE_URL}/customer`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${secretKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(customerData)
+      });
+
+      const createData = await createResp.json();
+      if (!createData?.status || !createData?.data?.customer_code) {
+        throw new Error(createData?.message || 'Failed to create Paystack customer');
+      }
+
+      customerCode = createData.data.customer_code;
+      console.log(`✅ Created new Paystack customer: ${customerCode}`);
+    }
+
+    // 4) Save customer code into CMS (by _owner)
+    if (customerCode) {
+      await saveCustomerCodeToProfile(userId, customerCode);
+    }
+
+    return customerCode;
+  } catch (err) {
+    console.error('❌ [getOrCreatePaystackCustomer] Error:', err.message);
+    throw new Error(`Customer creation failed: ${err.message}`);
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* 💾 Persist customer_code to Emergency_Profiles                              */
+/* -------------------------------------------------------------------------- */
+export async function saveCustomerCodeToProfile(userId, customerCode) {
+  try {
+    const q = await wixData.query('Emergency_Profiles')
+      .eq('_owner', userId)
+      .limit(1)
+      .find({ suppressAuth: true });
+
+    if (!q.items.length) {
+      console.warn(`[saveCustomerCodeToProfile] No profile found for user: ${userId}`);
+      return false;
+    }
+
+    const profile = q.items[0];
+    const updateData = {
+      _id: profile._id,
+      paystackCustomerCode: customerCode,
+      lastUpdated: new Date()
+    };
+
+    await wixData.update('Emergency_Profiles', updateData, { suppressAuth: true });
+    console.log(`💾 [Paystack] Saved customer_code ${customerCode} for user ${userId}`);
+    return true;
+  } catch (err) {
+    console.error(`[saveCustomerCodeToProfile] Error: ${err.message}`);
+    return false;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* 💳 Webhook entrypoint: handle subscription payment                          */
+/* -------------------------------------------------------------------------- */
+export async function handleSubscriptionPayment(paystackData) {
+  try {
+    const { customer, reference, metadata, amount } = paystackData;
+
+    if (!customer?.email || !metadata?.userId) {
+      console.warn('⚠️ Missing required data for subscription payment handling');
+      return { success: false, error: 'Missing required payment data' };
+    }
+
+    console.log(`💰 Handling subscription payment for ${customer.email}, amount: ${amount}`);
+
+    // Upsert & sync profile
+    const profile = await upsertEmergencyProfile(paystackData);
+
+    // Log payment
+    await wixData.insert('PaymentLog', {
+      userId: metadata.userId,
+      email: customer.email,
+      amount,
+      reference,
+      paymentType: 'subscription',
+      planName: metadata.planName || metadata.membershipTier || 'Unknown',
+      status: 'success',
+      processedAt: new Date()
+    }, { suppressAuth: true });
+
+    console.log(`✅ Subscription payment processed successfully for ${customer.email}`);
+
+    // OPTIONAL: notifications — only if the function exists (import may be commented)
+    try {
+      if (typeof sendPostPaymentNotifications === 'function') {
+        await sendPostPaymentNotifications(metadata.userId, reference);
+        console.log(`📱 [Paystack] Post-payment notifications sent for user: ${metadata.userId}`);
+      } else {
+        console.log('ℹ️ sendPostPaymentNotifications not available (skipped).');
+      }
+    } catch (notifyErr) {
+      console.warn('⚠️ Notification error (non-fatal):', notifyErr.message || notifyErr);
+    }
+
+    return { success: true, profile, message: 'Subscription payment processed successfully' };
+  } catch (err) {
+    console.error('❌ handleSubscriptionPayment error:', err.message);
+    throw new Error(`Subscription payment handling failed: ${err.message}`);
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* 🔐 Validate Paystack webhook signature                                      */
+/* -------------------------------------------------------------------------- */
+export async function validateWebhookSignature(rawBody, signature) {
+  try {
+    if (!rawBody || !signature) return false;
+
+    const webhookSecret = await getPaystackWebhookSecret();
+    const expectedSignature = createHmac('sha512', webhookSecret)
+      .update(rawBody)
+      .digest('hex');
+
+    return expectedSignature === signature;
+  } catch (err) {
+    console.error('❌ Webhook signature validation error:', err.message);
+    return false;
+  }
+}

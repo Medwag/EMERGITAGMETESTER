@@ -1,0 +1,103 @@
+// backend/log-service.jsw
+
+import wixData from 'wix-data';
+
+/**
+ * Fetches all activity logs for a specific member.
+ * @param {string} memberId The Wix member ID.
+ * @returns {Promise<Array<Object>>} A promise that resolves to an array of log records.
+ */
+export async function getMemberActivityLogs(memberId) {
+    try {
+        const [
+            profileViews,
+            profileUpdates,
+            payments,
+            waTests,
+            paystackEvents
+        ] = await Promise.all([
+            // 1. Profile Views (from DashboardViewLogs)
+            wixData.query('DashboardViewLogs')
+                .eq('ownerId', memberId)
+                .find()
+                .then(res => res.items.map(item => ({
+                    _id: `view-${item._id}`,
+                    logType: 'Profile Viewed',
+                    logDate: item.dateViewed,
+                    description: `Your profile was viewed by an external user at ${item.ipAddress || 'unknown location'}.`
+                }))),
+            
+            // 2. Profile Updates (from Emergency_Profiles)
+            wixData.query('Emergency_Profiles')
+                .eq('_owner', memberId)
+                .find()
+                .then(res => {
+                    if (res.items.length > 0) {
+                        const profile = res.items[0];
+                        const logs = [];
+                        if (profile.lastUpdated) {
+                            logs.push({
+                                _id: `update-${profile._id}`,
+                                logType: 'Profile Updated',
+                                logDate: profile.lastUpdated,
+                                description: 'Your personal information was last updated.'
+                            });
+                        }
+                        return logs;
+                    }
+                    return [];
+                }),
+            
+            // 3. Payments (from PaystackTransactions)
+            wixData.query('PaystackTransactions')
+                .eq('userId', memberId)
+                .find()
+                .then(res => res.items.map(item => ({
+                    _id: `payment-${item._id}`,
+                    logType: 'Payment',
+                    logDate: item._createdDate,
+                    description: `Payment of R${(item.amount / 100).toFixed(2)} for ${item.planName || 'your subscription'} was made.`
+                }))),
+            
+            // 4. WhatsApp Tests (from WhatsAppTestLogs)
+            wixData.query('WhatsAppTestLogs')
+                .eq('userId', memberId)
+                .find()
+                .then(res => res.items.map(item => ({
+                    _id: `watest-${item._id}`,
+                    logType: 'WhatsApp Test',
+                    logDate: item.date,
+                    description: `Test message sent. Status: ${item.status}.`
+                }))),
+
+            // 5. Paystack Events (from PaystackEventLogs)
+            wixData.query('PaystackEvents')
+                .eq('userId', memberId)
+                .find()
+                .then(res => res.items.map(item => ({
+                    _id: `paystack-${item._id}`,
+                    logType: 'Paystack Event',
+                    logDate: item.logDate,
+                    description: `Paystack event '${item.eventType}' for plan '${item.eventPayload?.data?.plan?.name || 'unknown'}' processed.`
+                })))
+        ]);
+
+        // Combine and sort all logs by date, newest first
+        const allLogs = [
+            ...profileViews,
+            ...profileUpdates,
+            ...payments,
+            ...waTests,
+            ...paystackEvents
+        ];
+
+        allLogs.sort((a, b) => new Date(b.logDate).getTime() - new Date(a.logDate).getTime());
+
+        // Limit to the last 20 logs for display purposes
+        return allLogs.slice(0, 20);
+
+    } catch (err) {
+        console.error('❌ Error in getMemberActivityLogs:', err);
+        return [];
+    }
+}

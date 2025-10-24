@@ -1,0 +1,331 @@
+// ✅ backend/payments.jsw
+import wixSecretsBackend from 'wix-secrets-backend';
+import crypto from 'crypto';
+
+/* ------------------------------------------------------------------
+   🧩 1. Shared Utility: PayFast Encoding (must be at top-level scope)
+------------------------------------------------------------------- */
+function payfastUrlEncode(str) {
+  const trimmed = String(str).trim();
+  return encodeURIComponent(trimmed)
+    .replace(/!/g, '%21')
+    .replace(/'/g, '%27')
+    .replace(/\(/g, '%28')
+    .replace(/\)/g, '%29')
+    .replace(/\*/g, '%2A')
+    .replace(/%20/g, '+')
+    .replace(/%([0-9a-f]{2})/g, (m, h) => '%' + h.toUpperCase());
+}
+
+/* ------------------------------------------------------------------
+   🧩 2. PayFast Error Handler
+------------------------------------------------------------------- */
+function handlePayfastError(error) {
+  const errorMessage = (error && error.message) ? error.message : String(error);
+
+  const errorMappings = {
+    'Merchant is unable to receive payments from the same account':
+      'Payment failed: Cannot process payment to merchant account email. Please use a different email address.',
+    'Generated signature does not match submitted signature':
+      'Payment configuration error: Signature mismatch. Please contact support.',
+    'Invalid signature':
+      'Payment configuration error: Invalid signature. Please contact support.',
+    'signature':
+      'Payment configuration error: Signature issue. Please contact support.',
+    'Invalid merchant':
+      'Merchant configuration error. Please contact support.',
+    'Amount too low':
+      'Minimum payment amount is R5.00.',
+    'Invalid email':
+      'Please provide a valid email address.',
+    'Transaction already exists':
+      'This transaction has already been processed.',
+    'passphrase':
+      'Payment configuration error: Passphrase issue. Please contact support.'
+  };
+
+  for (const [pattern, message] of Object.entries(errorMappings)) {
+    if (errorMessage.includes(pattern)) return new Error(message);
+  }
+  return new Error('Payment processing failed. Please try again or contact support.');
+}
+
+/* ------------------------------------------------------------------
+   ✅ 3. Generate PayFast Payment URL (LIVE)
+------------------------------------------------------------------- */
+export async function generatePayfastUrl({ amount, email, mPaymentId }) {
+  try {
+    console.log('🔵 Starting PayFast URL generation...');
+
+    const merchantId = await wixSecretsBackend.getSecret('payfast_merchant_id');
+    const merchantKey = await wixSecretsBackend.getSecret('payfast_merchant_key');
+    const passphrase = await wixSecretsBackend.getSecret('payfast_passphrase');
+
+    if (!merchantId || !merchantKey || !passphrase)
+      throw new Error('PayFast credentials incomplete');
+
+    if (!email || !email.includes('@')) throw new Error('Invalid email address');
+    if (isNaN(Number(amount)) || Number(amount) < 5.00) throw new Error('Invalid amount');
+    if (!mPaymentId) throw new Error('Missing mPaymentId');
+
+    const restrictedEmails = [
+      'admin@emergitag.me', 'payments@emergitag.me', 'merchant@emergitag.me',
+      'support@emergitag.me', 'gavin@emergitag.me', 'info@emergitag.me'
+    ];
+
+    if (restrictedEmails.includes(email.toLowerCase().trim()))
+      throw new Error('Merchant is unable to receive payments from the same account');
+
+    const data = {
+      amount: Number(amount).toFixed(2),
+      cancel_url: 'https://www.emergitag.me/payment-cancel',
+      confirmation_address: email.trim(),
+      email_address: email.trim(),
+      email_confirmation: '1',
+      item_description: 'Registration fee for Emergency Profile service',
+      item_name: 'Emergency Profile Sign-Up Fee',
+      m_payment_id: String(mPaymentId).trim(),
+      merchant_id: String(merchantId).trim(),
+      merchant_key: String(merchantKey).trim(),
+      notify_url: 'https://www.emergitag.me/_functions/payfastWebhook',
+      return_url: 'https://www.emergitag.me/payment-success'
+    };
+
+    const sortedKeys = Object.keys(data).sort();
+    let signatureString = '';
+
+    sortedKeys.forEach(key => {
+      const value = data[key];
+      if (value !== null && value !== undefined) {
+        const trimmedValue = String(value).trim();
+        if (trimmedValue !== '') signatureString += `${key}=${payfastUrlEncode(trimmedValue)}&`;
+      }
+    });
+
+    signatureString = signatureString.slice(0, -1);
+
+    const trimmedPass = String(passphrase).trim();
+    if (!/^[a-zA-Z0-9\-_\/]+$/.test(trimmedPass))
+      throw new Error('Passphrase contains invalid characters. Only letters, numbers, -, _, / allowed');
+
+    signatureString += `&passphrase=${payfastUrlEncode(trimmedPass)}`;
+    const signature = crypto.createHash('md5').update(signatureString).digest('hex').toLowerCase();
+
+    let queryString = '';
+    sortedKeys.forEach(key => {
+      const value = data[key];
+      if (value !== null && value !== undefined) {
+        const trimmedValue = String(value).trim();
+        if (trimmedValue !== '') queryString += `${key}=${payfastUrlEncode(trimmedValue)}&`;
+      }
+    });
+    queryString += `signature=${signature}`;
+
+    const finalUrl = `https://www.payfast.co.za/eng/process?${queryString}`;
+    return finalUrl;
+
+  } catch (error) {
+    console.error('PayFast URL generation error:', error);
+    throw handlePayfastError(error);
+  }
+}
+
+/* ------------------------------------------------------------------
+   ✅ 4. Generate Paystack Transaction URL (LIVE)
+------------------------------------------------------------------- */
+/**
+ * @typedef {Object} PaystackInitOptions
+ * @property {string} email - Customer email
+ * @property {string} id - Wix user ID or signup record ID
+ * @property {number} amount - Payment amount in kobo (ZAR * 100)
+ * @property {string} [transactionType] - 'signup_fee' or 'subscription_fee'
+ * @property {string} [planName] - Optional plan name
+ * @property {string} [planCode] - Optional Paystack plan code
+ */
+
+export async function generatePaystackUrl({
+  email,
+  id,
+  amount,
+  transactionType = 'signup_fee',
+  planName = null,
+  planCode = null
+}) {
+  try {
+    const secretKey = await wixSecretsBackend.getSecret('PaystackLiveSKey');
+    if (!secretKey) throw new Error('Paystack secret key not found');
+    if (typeof email !== 'string' || !email.includes('@')) throw new Error('Invalid email');
+    if (isNaN(Number(amount)) || Number(amount) <= 0) throw new Error('Invalid amount');
+
+    const reference = `${transactionType}_${id}_${Date.now()}`;
+
+    const metadata = {
+      userId: String(id),
+      transaction_type: String(transactionType),
+      planName: planName || '',
+      planCode: planCode || '',
+      firstName: typeof email === 'string' ? email.split('@')[0] : '',
+      timestamp: new Date().toISOString()
+    };
+
+    const initData = {
+      email: String(email),
+      amount: Number(amount),
+      currency: 'ZAR',
+      reference,
+      callback_url: 'https://www.emergitag.me/payment-success',
+      metadata
+    };
+
+    console.log(`💳 Initializing Paystack ${transactionType} payment for ${email}`);
+
+    const response = await fetch('https://api.paystack.co/transaction/initialize', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${secretKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(initData)
+    });
+
+    /** @type {{status?: boolean, message?: string, data?: {authorization_url?: string}}} */
+    const result = await response.json();
+
+    if (!response.ok || !result?.status) {
+      const msg = result?.message || 'Failed to initialize Paystack transaction';
+      throw new Error(msg);
+    }
+
+    const url = result?.data?.authorization_url;
+    if (!url) throw new Error('Missing authorization URL in Paystack response');
+
+    console.log(`✅ Paystack ${transactionType} URL generated: ${url}`);
+    return url;
+
+  } catch (error) {
+    console.error('❌ generatePaystackUrl error:', error);
+    throw new Error(error?.message || 'Failed to initialize payment with Paystack');
+  }
+}
+
+/* ------------------------------------------------------------------
+   ✅ 5. Manual PayFast Signature Test
+------------------------------------------------------------------- */
+export async function testPayfastSignature() {
+  try {
+    console.log('🧪 Testing PayFast signature generation...');
+
+    const testData = {
+      merchant_id: '10000100',
+      merchant_key: '46f0cd694581a',
+      return_url: 'http://www.yourdomain.co.za/return.php',
+      cancel_url: 'http://www.yourdomain.co.za/cancel.php',
+      notify_url: 'http://www.yourdomain.co.za/notify.php',
+      amount: '100.00',
+      item_name: 'Test Product',
+      email_address: 'test@test.com',
+      m_payment_id: '1234'
+    };
+
+    let signatureString = '';
+    Object.keys(testData).forEach(k => {
+      const v = testData[k];
+      if (v && String(v).trim() !== '') signatureString += `${k}=${payfastUrlEncode(String(v).trim())}&`;
+    });
+
+    signatureString = signatureString.slice(0, -1);
+    signatureString += '&passphrase=jt7NOE43FZPn';
+
+    const testSignature = crypto.createHash('md5').update(signatureString).digest('hex');
+
+    const merchantId = await wixSecretsBackend.getSecret('payfast_merchant_id');
+    const merchantKey = await wixSecretsBackend.getSecret('payfast_merchant_key');
+    const passphrase = await wixSecretsBackend.getSecret('payfast_passphrase');
+
+    return {
+      testSignature,
+      testString: signatureString,
+      hasCredentials: !!(merchantId && merchantKey && passphrase)
+    };
+  } catch (error) {
+    console.error('🧪 Test error:', error);
+    return { error: error.message };
+  }
+}
+/* ------------------------------------------------------------------
+   ✅ 6. Record Payment Event + Send Discord Notification
+------------------------------------------------------------------- */
+import { sendDiscordLog } from 'backend/logger.jsw';
+import wixData from 'wix-data';
+
+/**
+ * Record payment activity (for both signup and subscription)
+ * and send Discord notification automatically.
+ *
+ * @param {Object} options
+ * @param {string} options.userId - Wix user ID
+ * @param {string} options.email - User email
+ * @param {'signup_fee'|'subscription_fee'} options.type - Payment type
+ * @param {'payfast'|'paystack'} options.gateway - Payment gateway used
+ * @param {number} options.amount - Payment amount in ZAR
+ * @param {string} [options.planName] - Plan name (for subscriptions)
+ * @param {string} [options.reference] - Payment reference / transaction ID
+ * @param {'success'|'failed'|'pending'} [options.status='success'] - Payment status
+ */
+export async function recordPaymentEvent({
+  userId,
+  email,
+  type,
+  gateway,
+  amount,
+  planName = '',
+  reference = '',
+  status = 'success'
+}) {
+  try {
+    if (!userId || !email) {
+      console.warn('⚠️ Missing userId or email for recordPaymentEvent');
+      return;
+    }
+
+    const record = {
+      timestamp: new Date(),
+      userId,
+      email,
+      type,
+      gateway,
+      amount: Number(amount) || 0,
+      planName,
+      reference,
+      status,
+      environment: 'live'
+    };
+
+    await wixData.insert('PaymentAuditTrail', record, { suppressAuth: true });
+
+    const discordMsg =
+      `💰 **${type === 'signup_fee' ? 'Sign-Up Payment' : 'Subscription Payment'}**\n` +
+      `👤 User: ${email}\n` +
+      `💳 Gateway: ${gateway.toUpperCase()}\n` +
+      `📦 ${planName || '(N/A)'}\n` +
+      `💵 R${amount.toFixed(2)}\n` +
+      `🔖 Ref: ${reference || 'N/A'}\n` +
+      `📊 Status: ${status}`;
+
+    await sendDiscordLog(discordMsg);
+
+    console.log(`✅ Payment event recorded for ${email} (${type})`);
+  } catch (err) {
+    console.error('❌ recordPaymentEvent error:', err);
+    await sendDiscordLog(`❌ recordPaymentEvent failed: ${err.message}`);
+  }
+}
+
+/* ------------------------------------------------------------------
+   ✅ Default export for Velo interop
+------------------------------------------------------------------- */
+export default {
+  generatePayfastUrl,
+  generatePaystackUrl,
+  testPayfastSignature
+};

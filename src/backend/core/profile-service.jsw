@@ -1,0 +1,172 @@
+// =============================================================
+// ✅ EmergiTag.me – Core Profile Service (Cache-Safe Version)
+// =============================================================
+// Handles:
+//  • Profile creation and retrieval
+//  • Basic updates and validation
+//  • No default export (prevents Wix backend caching issues)
+//
+// Last updated: October 2025
+// =============================================================
+
+import wixData from 'wix-data';
+import wixUsersBackend from 'wix-users-backend';
+
+// =============================================================
+// 🔹 Get or Create Emergency Profile
+// =============================================================
+export async function getOrCreateProfile(userId) {
+  console.log(`[ProfileService] 🔍 getOrCreateProfile(${userId})`);
+
+  try {
+    // 1️⃣ Try to find an existing profile
+    const existingQuery = await wixData.query('Emergency_Profiles')
+      .eq('_owner', userId)
+      .limit(1)
+      .find({ suppressAuth: true });
+
+    if (existingQuery.items.length > 0) {
+      const profile = existingQuery.items[0];
+      console.log(`✅ [ProfileService] Found existing profile: ${profile._id}`);
+      return profile;
+    }
+
+    // 2️⃣ No profile found — create a new one
+    console.log(`[ProfileService] Creating new profile for user: ${userId}`);
+
+    const user = await wixUsersBackend.getUser(userId);
+    const email =
+      user?.contactDetails?.emails?.[0]?.email ||
+      `user${userId}@emergitag.me`;
+
+    const fullName = `${user?.contactDetails?.firstName || 'Member'} ${
+      user?.contactDetails?.lastName || ''
+    }`.trim();
+
+    const newProfile = {
+      _owner: userId,
+      email,
+      fullName,
+      // Default payment state
+      signUpPaid: false,
+      signUpReference: null,
+      paymentProvider: null,
+      // Subscription defaults
+      subscriptionActive: false,
+      membershipTier: null,
+      planStatus: null,
+      // Public View ID
+      publicViewId: generatePublicViewId(),
+      // Contact info placeholders
+      emergencyContact: '',
+      emergencyContactPrimaryNumber: '',
+      relationship: '',
+      // Timestamps
+      createdAt: new Date(),
+      lastUpdated: new Date(),
+      // Visibility
+      isPublic: false
+    };
+
+    const createdProfile = await wixData.insert(
+      'Emergency_Profiles',
+      newProfile,
+      { suppressAuth: true }
+    );
+
+    console.log(`✅ [ProfileService] Created new profile: ${createdProfile._id}`);
+    return createdProfile;
+
+  } catch (error) {
+    console.error(`❌ [ProfileService] getOrCreateProfile failed:`, error);
+    throw new Error(`Profile creation/retrieval failed: ${error.message}`);
+  }
+}
+
+// =============================================================
+// 🔹 Update Existing Profile
+// =============================================================
+export async function updateProfile(userId, updates) {
+  console.log(`[ProfileService] 📝 updateProfile(${userId})`);
+  try {
+    const existingQuery = await wixData.query('Emergency_Profiles')
+      .eq('_owner', userId)
+      .limit(1)
+      .find({ suppressAuth: true });
+
+    if (existingQuery.items.length === 0) {
+      throw new Error('Profile not found for update');
+    }
+
+    const profile = existingQuery.items[0];
+    const updateData = {
+      _id: profile._id,
+      ...updates,
+      lastUpdated: new Date()
+    };
+
+    Object.keys(updateData).forEach((key) => {
+      if (updateData[key] === undefined) delete updateData[key];
+    });
+
+    const updated = await wixData.update('Emergency_Profiles', updateData, {
+      suppressAuth: true
+    });
+    console.log(`✅ [ProfileService] Updated profile: ${updated._id}`);
+    return updated;
+  } catch (error) {
+    console.error(`❌ [ProfileService] updateProfile failed:`, error);
+    throw new Error(`Profile update failed: ${error.message}`);
+  }
+}
+
+// =============================================================
+// 🔹 Get Profile by User ID
+// =============================================================
+export async function getProfile(userId) {
+  try {
+    const query = await wixData.query('Emergency_Profiles')
+      .eq('_owner', userId)
+      .limit(1)
+      .find({ suppressAuth: true });
+
+    return query.items.length > 0 ? query.items[0] : null;
+  } catch (error) {
+    console.error(`❌ [ProfileService] getProfile error:`, error);
+    return null;
+  }
+}
+
+// =============================================================
+// 🔹 Get Profile by Public ID
+// =============================================================
+export async function getProfileByPublicId(publicViewId) {
+  try {
+    const query = await wixData.query('Emergency_Profiles')
+      .eq('publicViewId', publicViewId)
+      .limit(1)
+      .find({ suppressAuth: true });
+
+    return query.items.length > 0 ? query.items[0] : null;
+  } catch (error) {
+    console.error(`❌ [ProfileService] getProfileByPublicId error:`, error);
+    return null;
+  }
+}
+
+// =============================================================
+// 🔹 Generate Unique Public View ID
+// =============================================================
+export function generatePublicViewId() {
+  const timestamp = Date.now();
+  const random = Math.random().toString(36).substring(2, 10);
+  return `emergitag-${timestamp}-${random}`;
+}
+
+// =============================================================
+// 🔹 Get Emergency Profile URL
+// =============================================================
+export function getEmergencyProfileUrl(profile) {
+  if (!profile?.publicViewId) return null;
+  return `https://www.emergitag.me/emergencyview/${profile.publicViewId}`;
+}

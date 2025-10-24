@@ -1,0 +1,218 @@
+// backend/whatsapp.jsw
+import { getSecret } from 'wix-secrets-backend';
+import { fetch } from 'wix-fetch';
+
+/* === 1. Sign-up Message ===
+   Template: emergitag_sign_up_message
+   Variables: NONE, sent once after successful sign-up */
+export async function sendSignUpMessage(profile) {
+  try {
+    if (!profile || !profile.phone) {
+      console.warn("⚠️ Cannot send sign-up WhatsApp: profile or phone missing");
+      return;
+    }
+
+    const phoneNumberId = await getSecret("whatsappPhoneId");
+    const token = await getSecret("whatsappToken");
+
+    const url = `https://graph.facebook.com/v19.0/${phoneNumberId}/messages`;
+
+    const body = {
+      messaging_product: "whatsapp",
+      to: profile.phone,
+      type: "template",
+      template: {
+        name: "emergitag_sign_up_message",
+        language: { code: "en" }
+        // No variables needed
+      }
+    };
+
+    const res = await fetch(url, {
+      method: "post",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    });
+
+    const data = await res.json();
+    console.log("✅ Sign-up WhatsApp sent:", data);
+    return data;
+
+  } catch (err) {
+    console.error("❌ sendSignUpMessage error:", err);
+  }
+}
+
+/* === 2. Subscription Success ===
+   Template: emergitagme_successful_subscription
+   Variables:
+     1 = User Name
+     2 = Plan Name
+     3 = Activated Date
+     4 = Link to Clients Dashboard */
+export async function sendSubscriptionSuccess(profile, { planName, activatedDate, dashboardLink }) {
+  try {
+    if (!profile || !profile.phone) {
+      console.warn("⚠️ Cannot send subscription WhatsApp: profile or phone missing");
+      return;
+    }
+
+    const phoneNumberId = await getSecret("whatsappPhoneId");
+    const token = await getSecret("whatsappToken");
+
+    const url = `https://graph.facebook.com/v19.0/${phoneNumberId}/messages`;
+
+    const body = {
+      messaging_product: "whatsapp",
+      to: profile.phone,
+      type: "template",
+      template: {
+        name: "emergitagme_successful_subscription",
+        language: { code: "en" },
+        components: [
+          {
+            type: "body",
+            parameters: [
+              { type: "text", text: profile.fullName || "Member" },   // Variable 1
+              { type: "text", text: planName || "N/A" },              // Variable 2
+              { type: "text", text: activatedDate || "N/A" },         // Variable 3
+              { type: "text", text: dashboardLink || "N/A" }          // Variable 4
+            ]
+          }
+        ]
+      }
+    };
+
+    const res = await fetch(url, {
+      method: "post",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    });
+
+    const data = await res.json();
+    console.log("✅ Subscription WhatsApp sent:", data);
+    return data;
+
+  } catch (err) {
+    console.error("❌ sendSubscriptionSuccess error:", err);
+  }
+}
+// backend/whatsapp.jsw
+
+/**
+ * Send Profile View Notification WhatsApp Template
+ * @param {Object} profile - The profile being viewed
+ * @param {Object} options - Viewer info
+ *   options.viewerName - Name of the person viewing
+ *   options.viewerLocation - Location of viewer
+ *   options.viewerIp - IP address of viewer
+ */
+export async function sendProfileViewNotification(profile, { viewerName, viewerLocation, viewerIp }) {
+  try {
+    if (!profile || !profile.phone) {
+      console.warn("⚠️ Cannot send notification: profile or phone missing");
+      return;
+    }
+
+    const phoneNumberId = await getSecret("whatsappPhoneId");
+    const token = await getSecret("whatsappToken");
+
+    const url = `https://graph.facebook.com/v19.0/${phoneNumberId}/messages`;
+
+    const body = {
+      messaging_product: "whatsapp",
+      to: profile.phone,
+      type: "template",
+      template: {
+        name: "emergitag_profile_view_notification",
+        language: { code: "en" },
+        components: [
+          {
+            type: "body",
+            parameters: [
+              { type: "text", text: profile.fullName || "Client" }, // Variable 1
+              { type: "text", text: profile.publicViewId || "N/A" }, // Variable 2
+              { type: "text", text: viewerLocation || "Unknown" },   // Variable 3
+              { type: "text", text: viewerIp || "Unknown" }          // Variable 4
+            ]
+          }
+        ]
+      }
+    };
+
+    const res = await fetch(url, {
+      method: "post",
+      headers: {
+        "Authorization": `Bearer ${token}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    });
+
+    const data = await res.json();
+    console.log("✅ Profile View WhatsApp sent:", data);
+    return data;
+
+  } catch (err) {
+    console.error("❌ sendProfileViewNotification error:", err);
+  }
+}
+// --- Generic wrapper for backward compatibility ---
+// Accepts either an array of variables (ordered) or an object {var1,...}
+export async function sendWhatsAppTemplate(to, templateName, variables = []) {
+  try {
+    const phoneNumberId = await getSecret("whatsappPhoneId");
+    const token = await getSecret("whatsappToken");
+    const url = `https://graph.facebook.com/v19.0/${phoneNumberId}/messages`;
+
+    // Normalize variables to the array WhatsApp expects
+    const paramsArray = Array.isArray(variables)
+      ? variables
+      : Object.keys(variables).sort().map(k => variables[k]); // object → ordered array
+
+    const body = {
+      messaging_product: "whatsapp",
+      to,
+      type: "template",
+      template: {
+        name: templateName,
+        language: { code: "en" },
+        ...(paramsArray.length
+          ? {
+              components: [
+                {
+                  type: "body",
+                  parameters: paramsArray.map(v => ({
+                    type: "text",
+                    text: String(v ?? "")
+                  }))
+                }
+              ]
+            }
+          : {})
+      }
+    };
+
+    const res = await fetch(url, {
+      method: "post",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    });
+
+    const data = await res.json();
+    console.log(`✅ sendWhatsAppTemplate(${templateName}) sent:`, data);
+    return data;
+  } catch (err) {
+    console.error("❌ sendWhatsAppTemplate error:", err);
+    throw err;
+  }
+}

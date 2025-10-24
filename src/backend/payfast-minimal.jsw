@@ -1,0 +1,86 @@
+// Minimal PayFast function to bypass all import issues
+// This should work even if other files have problems
+
+import { getSecret } from 'wix-secrets-backend';
+import crypto from 'crypto';
+
+export async function createMinimalPayFastUrl(userId, email) {
+  console.log('[Minimal PayFast] Starting minimal URL generation...');
+  
+  try {
+    // Get secrets directly - no config objects
+    const merchantId = await getSecret('payfast_merchant_id');
+    const merchantKey = await getSecret('payfast_merchant_key');
+    
+    console.log('[Minimal PayFast] Credentials:', { 
+      merchantId: merchantId ? 'present' : 'missing',
+      merchantKey: merchantKey ? 'present' : 'missing'
+    });
+    
+    // Use hardcoded values if secrets aren't available
+    const finalMerchantId = merchantId || '10000100';
+    const finalMerchantKey = merchantKey || '46f0cd694581a';
+    
+    // Create minimal parameters
+    const params = {
+      merchant_id: parseInt(finalMerchantId, 10),
+      merchant_key: String(finalMerchantKey),
+      amount: '149.00',
+      item_name: 'EmergiTag Signup Fee',
+      return_url: 'https://www.emergitag.me/signup-success',
+      cancel_url: 'https://www.emergitag.me/signup-cancelled',
+      notify_url: 'https://www.emergitag.me/_functions/payfastWebhook',
+      name_first: 'EmergiTag',
+      name_last: 'Member',
+      email_address: String(email || 'billing@emergitag.me'),
+      m_payment_id: `SIGNUP_${userId}_${Date.now()}`
+    };
+    
+    console.log('[Minimal PayFast] Parameters created:', Object.keys(params));
+    
+    // Create signature
+    const sortedKeys = Object.keys(params).sort();
+    const signatureString = sortedKeys
+      .map(key => `${key}=${encodeURIComponent(String(params[key]))}`)
+      .join('&');
+    
+    const signature = crypto.createHash('md5').update(signatureString, 'utf8').digest('hex');
+    params.signature = signature;
+    
+    // Build URL
+    const baseUrl = 'https://sandbox.payfast.co.za/eng/process';
+    const queryString = Object.keys(params)
+      .sort()
+      .map(k => `${k}=${encodeURIComponent(String(params[k]))}`)
+      .join('&');
+    
+    const url = `${baseUrl}?${queryString}`;
+    
+    console.log('[Minimal PayFast] URL generated successfully');
+    console.log('[Minimal PayFast] URL length:', url.length);
+    
+    // Check for [object Promise]
+    if (url.includes('[object Promise]')) {
+      console.error('[Minimal PayFast] ERROR: URL contains [object Promise]');
+      return {
+        success: false,
+        error: 'URL contains [object Promise]',
+        gateway: 'payfast'
+      };
+    }
+    
+    return {
+      success: true,
+      redirectUrl: url,
+      gateway: 'payfast'
+    };
+    
+  } catch (error) {
+    console.error('[Minimal PayFast] Error:', error);
+    return {
+      success: false,
+      error: error.message,
+      gateway: 'payfast'
+    };
+  }
+}

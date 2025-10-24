@@ -1,0 +1,129 @@
+// Quick PayFast Signature Validation Test
+// Tests our signature generation against PayFast's official test case
+
+import { generatePayFastSignature } from 'backend/payfastUtils.jsw';
+
+export async function quickSignatureTest() {
+  console.log('🧪 Quick PayFast Signature Validation');
+  console.log('====================================');
+
+  // PayFast's EXACT test case from their documentation
+  // Source: https://developers.payfast.co.za/docs#step_3_form_submission
+  const testData = {
+    merchant_id: 10000100,
+    merchant_key: '46f0cd694581a',
+    amount: '100.00',
+    item_name: 'Test Item',
+    return_url: 'http://www.example.com/return',
+    cancel_url: 'http://www.example.com/cancel',
+    notify_url: 'http://www.example.com/notify'
+  };
+
+  const testPassphrase = 'jt7NOE43FZPn';
+  
+  // Expected signature from PayFast documentation
+  const expectedMD5 = 'c96a7de90ff289dc83f1c544701ea7c6';
+
+  console.log('Test Parameters:', testData);
+  console.log('Test Passphrase:', testPassphrase);
+  console.log('Expected MD5:', expectedMD5);
+
+  // Generate our signature
+  const ourSignature = generatePayFastSignature(testData, testPassphrase);
+  console.log('Our Signature:', ourSignature);
+
+  // Compare
+  const isMatch = ourSignature.toLowerCase() === expectedMD5.toLowerCase();
+  console.log('Signatures Match:', isMatch ? '✅ YES' : '❌ NO');
+
+  if (!isMatch) {
+    console.log('\n🔍 DEBUGGING SIGNATURE MISMATCH:');
+    
+    // Manual step-by-step signature generation for debugging
+    const filteredParams = { ...testData };
+    console.log('1. Filtered params:', filteredParams);
+    
+    const sortedKeys = Object.keys(filteredParams).sort();
+    console.log('2. Sorted keys:', sortedKeys);
+    
+    const pairs = sortedKeys.map(key => {
+      const value = encodeURIComponent(String(filteredParams[key]));
+      console.log(`   ${key}=${value}`);
+      return `${key}=${value}`;
+    });
+    
+    const signatureString = pairs.join('&');
+    console.log('3. Signature string:', signatureString);
+    
+    const withPassphrase = `${signatureString}&passphrase=${encodeURIComponent(testPassphrase)}`;
+    console.log('4. With passphrase:', withPassphrase);
+    
+    // Manual MD5 calculation
+    const crypto = require('crypto');
+    const manualMD5 = crypto.createHash('md5').update(withPassphrase, 'utf8').digest('hex');
+    console.log('5. Manual MD5:', manualMD5);
+  }
+
+  return {
+    success: isMatch,
+    expected: expectedMD5,
+    generated: ourSignature,
+    testData,
+    passphrase: testPassphrase
+  };
+}
+
+export async function testCurrentCredentials() {
+  console.log('🔐 Testing Current PayFast Credentials');
+  console.log('=====================================');
+  
+  try {
+    // Import config dynamically to avoid circular dependencies
+    const { getSecret } = await import('wix-secrets-backend');
+    
+    const merchantId = await getSecret('payfast_merchant_id');
+    const merchantKey = await getSecret('payfast_merchant_key');
+    const passphrase = await getSecret('payfast_passphrase');
+    
+    console.log('Current Credentials:');
+    console.log('- Merchant ID:', merchantId, '(type:', typeof merchantId, ')');
+    console.log('- Merchant Key:', merchantKey ? `${merchantKey.substring(0, 3)}...${merchantKey.substring(10)}` : 'missing');
+    console.log('- Passphrase:', passphrase ? 'present' : 'missing');
+    
+    // Test with current credentials
+    const testParams = {
+      merchant_id: parseInt(merchantId, 10),
+      merchant_key: merchantKey,
+      amount: '149.00',
+      item_name: 'EmergiTag Signup Fee',
+      return_url: 'https://www.emergitag.me/signup-success',
+      cancel_url: 'https://www.emergitag.me/signup-cancelled',
+      notify_url: 'https://www.emergitag.me/_functions/payfastWebhook',
+      email_address: 'test@emergitag.me',
+      name_first: 'Test',
+      name_last: 'User',
+      m_payment_id: 'TEST_' + Date.now()
+    };
+    
+    const signature = generatePayFastSignature(testParams, passphrase || '');
+    console.log('Generated signature for current credentials:', signature);
+    
+    return {
+      success: true,
+      credentials: {
+        merchantId,
+        merchantKey: merchantKey ? 'present' : 'missing',
+        passphrase: passphrase ? 'present' : 'missing'
+      },
+      signature,
+      testParams
+    };
+    
+  } catch (error) {
+    console.error('Failed to test current credentials:', error);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}

@@ -1,0 +1,50 @@
+// ✅ backend/smsportal.jsw
+import wixSecretsBackend from 'wix-secrets-backend';
+import { fetch } from 'wix-fetch';
+
+/**
+ * Send an SMS using SMSPortal REST API (v2)
+ * @param {string} to - Recipient's phone number in international format (e.g. "27821234567")
+ * @param {string} message - The message content (max 160 chars for a single SMS)
+ * @returns {Promise<object>} - API response
+ */
+export async function sendSMS(to, message) {
+  try {
+    const clientId = await wixSecretsBackend.getSecret('smsportalClientID');
+    const secret = await wixSecretsBackend.getSecret('smsportalSecret');
+    if (!clientId || !secret) throw new Error('Missing SMSPortal credentials.');
+
+    // Base64 encode clientId:secret for Basic Auth
+    const authToken = Buffer.from(`${clientId}:${secret}`).toString('base64');
+
+    const url = 'https://rest.smsportal.com/v2/Message';
+
+    const body = {
+      Messages: [
+        {
+          Content: message,
+          Destination: to
+        }
+      ]
+    };
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Basic ${authToken}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(body)
+    });
+
+    const result = await response.json();
+
+    console.log('📤 [SMSPortal] Response:', result);
+
+    if (!response.ok) throw new Error(result.Error || 'SMS sending failed.');
+    return result;
+  } catch (err) {
+    console.error('💥 SMSPortal error:', err);
+    return { success: false, error: err.message };
+  }
+}

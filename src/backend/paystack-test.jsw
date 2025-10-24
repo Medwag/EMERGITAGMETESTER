@@ -1,0 +1,407 @@
+// ✅ backend/paystack-test.jsw
+// Test functions to validate Paystack configuration
+import { 
+    getPaystackSecretKey, 
+    getPaystackWebhookSecret, 
+    getEnvironmentMode, 
+    isLiveMode,
+    getCallbackUrl,
+    PAYSTACK_CONFIG,
+    logConfigInfo
+} from './paystack-config.jsw';
+import { getPlanByName, getAllPlans } from './plan-utils.jsw';
+import { verifyPaystackPayment } from './paystack-utils.jsw';
+import { fetch } from 'wix-fetch';
+
+/**
+ * Test Paystack recovery functions - verifies no browser-specific code errors
+ * @returns {Promise<object>}
+ */
+export async function testRecoveryFunctions() {
+    try {
+        console.log('🧪 Testing Paystack recovery imports...');
+        
+        // Test that we can import the recovery module without errors
+        const recoveryModule = await import('backend/paystackRecoveryAndSync.jsw');
+        console.log('✅ Recovery module imported successfully');
+        
+        // Verify functions exist
+        if (typeof recoveryModule.recoverAndSyncPaystackSubscription === 'function') {
+            console.log('✅ recoverAndSyncPaystackSubscription function exists');
+        } else {
+            throw new Error('recoverAndSyncPaystackSubscription function missing');
+        }
+        
+        if (typeof recoveryModule.recoverAndSyncPaystack === 'function') {
+            console.log('✅ recoverAndSyncPaystack function exists');
+        } else {
+            throw new Error('recoverAndSyncPaystack function missing');
+        }
+        
+        return {
+            status: 'success',
+            message: 'Recovery functions loaded without browser-specific errors',
+            functions: ['recoverAndSyncPaystackSubscription', 'recoverAndSyncPaystack']
+        };
+    } catch (error) {
+        console.error('❌ Recovery function test failed:', error);
+        return {
+            status: 'error',
+            message: error.message,
+            error: error.toString()
+        };
+    }
+}
+
+/**
+ * Test the configuration setup
+ * Call this from frontend to verify everything is working
+ */
+export async function testPaystackConfiguration() {
+    const results = {
+        timestamp: new Date(),
+        environment: getEnvironmentMode(),
+        isLive: isLiveMode(),
+        tests: {}
+    };
+
+    try {
+        // Test 1: Secret key loading
+        console.log("🧪 Testing secret key loading...");
+        const secretKey = await getPaystackSecretKey();
+        results.tests.secretKey = {
+            success: !!secretKey,
+            keyLength: secretKey ? secretKey.length : 0,
+            startsWithSk: secretKey ? secretKey.startsWith('sk_') : false
+        };
+
+        // Test 2: Webhook secret loading
+        console.log("🧪 Testing webhook secret loading...");
+        try {
+            const webhookSecret = await getPaystackWebhookSecret();
+            results.tests.webhookSecret = {
+                success: !!webhookSecret,
+                keyLength: webhookSecret ? webhookSecret.length : 0
+            };
+        } catch (error) {
+            results.tests.webhookSecret = {
+                success: false,
+                error: error.message
+            };
+        }
+
+        // Test 3: Configuration values
+        console.log("🧪 Testing configuration values...");
+        results.tests.config = {
+            apiBaseUrl: PAYSTACK_CONFIG.API_BASE_URL,
+            currency: PAYSTACK_CONFIG.CURRENCY,
+            callbackUrls: {
+                signup: getCallbackUrl('signup'),
+                payment: getCallbackUrl('payment')
+            },
+            supportedEvents: PAYSTACK_CONFIG.SUPPORTED_WEBHOOK_EVENTS.length
+        };
+
+        // Test 4: API connectivity
+        console.log("🧪 Testing API connectivity...");
+        try {
+            const response = await fetch(`${PAYSTACK_CONFIG.API_BASE_URL}/bank`, {
+                method: "GET",
+                headers: {
+                    Authorization: `Bearer ${secretKey}`,
+                    "Content-Type": "application/json"
+                }
+            });
+            
+            results.tests.apiConnectivity = {
+                success: response.ok,
+                status: response.status,
+                message: response.ok ? "API accessible" : "API connection failed"
+            };
+        } catch (error) {
+            results.tests.apiConnectivity = {
+                success: false,
+                error: error.message
+            };
+        }
+
+        // Test 5: Plan loading
+        console.log("🧪 Testing plan loading...");
+        try {
+            const bronzePlan = await getPlanByName("Bronze");
+            const allPlans = await getAllPlans();
+            
+            results.tests.plans = {
+                success: !!bronzePlan,
+                bronzePlanFound: !!bronzePlan,
+                totalPlans: allPlans ? allPlans.length : 0,
+                samplePlan: bronzePlan ? {
+                    name: bronzePlan.planName,
+                    monthlyAmount: bronzePlan.amountMonthly,
+                    hasPaystackCode: !!bronzePlan.paystackPlanCode
+                } : null
+            };
+        } catch (error) {
+            results.tests.plans = {
+                success: false,
+                error: error.message
+            };
+        }
+
+        console.log("✅ Configuration test completed");
+        logConfigInfo();
+        return results;
+
+    } catch (error) {
+        console.error("❌ Configuration test failed:", error);
+        results.error = error.message;
+        return results;
+    }
+}
+
+/**
+ * Test payment verification with a known reference
+ * @param {string} reference - A test transaction reference
+ */
+export async function testPaymentVerification(reference) {
+    if (!reference) {
+        return { 
+            success: false, 
+            error: "Please provide a transaction reference to test" 
+        };
+    }
+
+    console.log(`🧪 Testing payment verification for: ${reference}`);
+    
+    try {
+        const result = await verifyPaystackPayment(reference);
+        console.log("Payment verification result:", result);
+        return result;
+    } catch (error) {
+        console.error("❌ Payment verification test failed:", error);
+        return {
+            success: false,
+            error: error.message
+        };
+    }
+}
+
+/**
+ * Test plan configuration completeness
+ */
+export async function testPlanConfiguration() {
+    console.log("🧪 Testing plan configuration...");
+    
+    try {
+        const allPlans = await getAllPlans();
+        const results = {
+            totalPlans: allPlans.length,
+            planDetails: [],
+            issues: []
+        };
+
+        for (const plan of allPlans) {
+            const planDetail = {
+                name: plan.planName,
+                hasMonthlyAmount: !!plan.amountMonthly,
+                hasAnnualAmount: !!plan.amountAnnual,
+                hasMonthlyCode: !!plan.paystackPlanCode,
+                hasAnnualCode: !!plan.paystackPlanCodeAnnual,
+                complete: false
+            };
+
+            // Check completeness
+            planDetail.complete = planDetail.hasMonthlyAmount && 
+                                 planDetail.hasMonthlyCode;
+
+            if (!planDetail.complete) {
+                results.issues.push(`Plan ${plan.planName} is missing required fields`);
+            }
+
+            results.planDetails.push(planDetail);
+        }
+
+        results.success = results.issues.length === 0;
+        console.log("Plan configuration test results:", results);
+        return results;
+
+    } catch (error) {
+        console.error("❌ Plan configuration test failed:", error);
+        return {
+            success: false,
+            error: error.message
+        };
+    }
+}
+
+/**
+ * Test signup recovery modules - ensures no ModuleLoadError
+ * @returns {Promise<object>}
+ */
+export async function testSignupRecoveryModules() {
+    try {
+        console.log('🧪 Testing Signup Recovery modules...');
+        
+        // Test verifyOrRecoverPaystackTransaction
+        const verifyModule = await import('backend/verifyOrRecoverPaystackTransaction.jsw');
+        if (typeof verifyModule.verifyOrRecoverPaystackTransaction === 'function') {
+            console.log('✅ verifyOrRecoverPaystackTransaction module loaded successfully');
+        } else {
+            throw new Error('verifyOrRecoverPaystackTransaction function not found');
+        }
+        
+        // Test paystackRecoveryAndSync
+        const recoveryModule = await import('backend/paystackRecoveryAndSync.jsw');
+        if (typeof recoveryModule.recoverAndSyncPaystack === 'function') {
+            console.log('✅ recoverAndSyncPaystack module loaded successfully');
+        } else {
+            throw new Error('recoverAndSyncPaystack function not found');
+        }
+        
+        if (typeof recoveryModule.recoverAndSyncPaystackSubscription === 'function') {
+            console.log('✅ recoverAndSyncPaystackSubscription module loaded successfully');
+        } else {
+            throw new Error('recoverAndSyncPaystackSubscription function not found');
+        }
+        
+        return {
+            status: 'success',
+            message: 'All signup recovery modules loaded without ModuleLoadError',
+            modules: ['verifyOrRecoverPaystackTransaction', 'paystackRecoveryAndSync']
+        };
+    } catch (error) {
+        console.error('❌ Signup recovery module test failed:', error);
+        return {
+            status: 'error',
+            message: error.message,
+            error: error.toString()
+        };
+    }
+}
+
+/**
+ * Test all Paystack recovery and legacy functions - comprehensive error check
+ * @returns {Promise<object>}
+ */
+export async function testAllPaystackModules() {
+    try {
+        console.log('🧪 Testing ALL Paystack modules for browser-specific errors...');
+        
+        const results = {
+            modules: [],
+            errors: [],
+            success: true
+        };
+        
+        // Test paystack-config.jsw
+        try {
+            const configModule = await import('backend/paystack-config.jsw');
+            results.modules.push('✅ paystack-config.jsw - loaded successfully');
+        } catch (error) {
+            results.errors.push(`❌ paystack-config.jsw - ${error.message}`);
+            results.success = false;
+        }
+        
+        // Test paystack.jsw (legacy file)
+        try {
+            const paystackModule = await import('backend/paystack.jsw');
+            results.modules.push('✅ paystack.jsw - loaded successfully');
+        } catch (error) {
+            results.errors.push(`❌ paystack.jsw - ${error.message}`);
+            results.success = false;
+        }
+        
+        // Test paystackRecoveryAndSync.jsw
+        try {
+            const recoveryModule = await import('backend/paystackRecoveryAndSync.jsw');
+            results.modules.push('✅ paystackRecoveryAndSync.jsw - loaded successfully');
+        } catch (error) {
+            results.errors.push(`❌ paystackRecoveryAndSync.jsw - ${error.message}`);
+            results.success = false;
+        }
+        
+        // Test verifyOrRecoverPaystackTransaction.jsw
+        try {
+            const verifyModule = await import('backend/verifyOrRecoverPaystackTransaction.jsw');
+            results.modules.push('✅ verifyOrRecoverPaystackTransaction.jsw - loaded successfully');
+        } catch (error) {
+            results.errors.push(`❌ verifyOrRecoverPaystackTransaction.jsw - ${error.message}`);
+            results.success = false;
+        }
+        
+        // Test paystack-utils.jsw
+        try {
+            const utilsModule = await import('backend/paystack-utils.jsw');
+            results.modules.push('✅ paystack-utils.jsw - loaded successfully');
+        } catch (error) {
+            results.errors.push(`❌ paystack-utils.jsw - ${error.message}`);
+            results.success = false;
+        }
+        
+        return {
+            status: results.success ? 'success' : 'error',
+            message: results.success ? 'All Paystack modules loaded without browser-specific errors' : 'Some modules have errors',
+            results: results
+        };
+    } catch (error) {
+        console.error('❌ Comprehensive module test failed:', error);
+        return {
+            status: 'error',
+            message: error.message,
+            error: error.toString()
+        };
+    }
+}
+
+/**
+ * Run all tests and return comprehensive results
+ */
+export async function runAllTests() {
+    console.log("🚀 Running all Paystack tests...");
+    
+    const testResults = {
+        timestamp: new Date(),
+        environment: getEnvironmentMode(),
+        results: {}
+    };
+
+    try {
+        testResults.results.configuration = await testPaystackConfiguration();
+        testResults.results.planConfiguration = await testPlanConfiguration();
+        testResults.results.recoveryFunctions = await testRecoveryFunctions();
+        testResults.results.signupRecovery = await testSignupRecoveryModules();
+        testResults.results.allModules = await testAllPaystackModules();
+        
+        testResults.success = testResults.results.configuration.tests && 
+                             testResults.results.planConfiguration.success &&
+                             testResults.results.recoveryFunctions.status === 'success' &&
+                             testResults.results.signupRecovery.status === 'success' &&
+                             testResults.results.allModules.status === 'success';
+
+        console.log("🎯 All tests completed");
+        return testResults;
+
+    } catch (error) {
+        console.error("❌ Test suite failed:", error);
+        testResults.success = false;
+        testResults.error = error.message;
+        return testResults;
+    }
+}
+
+/**
+ * Get configuration summary for debugging
+ */
+export function getConfigSummary() {
+    return {
+        environment: getEnvironmentMode(),
+        isLive: isLiveMode(),
+        apiUrl: PAYSTACK_CONFIG.API_BASE_URL,
+        currency: PAYSTACK_CONFIG.CURRENCY,
+        supportedEvents: PAYSTACK_CONFIG.SUPPORTED_WEBHOOK_EVENTS,
+        callbackUrls: {
+            signup: getCallbackUrl('signup'),
+            payment: getCallbackUrl('payment')
+        }
+    };
+}

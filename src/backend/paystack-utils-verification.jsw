@@ -1,0 +1,175 @@
+// ✅ Quick verification test for paystack-utils.jsw functions
+// Call this to verify the publicViewId generation and profile upsert is working
+
+import { upsertEmergencyProfile } from 'backend/paystack-utils.jsw';
+
+// Safe crypto import - only load when needed
+let crypto = null;
+async function getCrypto() {
+    if (!crypto) {
+        try {
+            crypto = await import('crypto');
+            return crypto;
+        } catch (err) {
+            console.warn('Crypto module not available:', err.message);
+            return null;
+        }
+    }
+    return crypto;
+}
+
+// Fallback UUID generation when crypto is not available
+function generateFallbackUUID() {
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+        const r = Math.random() * 16 | 0;
+        const v = c === 'x' ? r : (r & 0x3 | 0x8);
+        return v.toString(16);
+    });
+}
+
+/**
+ * Test the publicViewId generation and profile upsert functionality
+ */
+export async function testPublicViewIdGeneration() {
+    console.log("🧪 Testing publicViewId generation...");
+    
+    // Test data that simulates a Paystack webhook payload
+    const mockPaystackData = {
+        customer: {
+            email: "test@example.com",
+            id: "cust_123456"
+        },
+        reference: "test_ref_" + Date.now(),
+        metadata: {
+            userId: "test-user-" + Date.now(),
+            planName: "Bronze",
+            membershipTier: "Bronze"
+        }
+    };
+    
+    try {
+        // Test 1: Create new profile (should generate new publicViewId)
+        console.log("📝 Test 1: Creating new profile...");
+        const result1 = await upsertEmergencyProfile(mockPaystackData);
+        
+        const hasPublicViewId = result1.publicViewId && result1.publicViewId.length > 0;
+        console.log(`✅ New profile created with publicViewId: ${hasPublicViewId ? result1.publicViewId : 'MISSING!'}`);
+        
+        // Test 2: Update existing profile (should preserve publicViewId)
+        console.log("📝 Test 2: Updating existing profile...");
+        const updatedPaystackData = {
+            ...mockPaystackData,
+            metadata: {
+                ...mockPaystackData.metadata,
+                planName: "Silver" // Changed plan
+            }
+        };
+        
+        const result2 = await upsertEmergencyProfile(updatedPaystackData);
+        
+        const preservedPublicViewId = result2.publicViewId === result1.publicViewId;
+        console.log(`✅ Profile updated, publicViewId preserved: ${preservedPublicViewId ? 'YES' : 'NO'}`);
+        console.log(`   Original: ${result1.publicViewId}`);
+        console.log(`   Updated:  ${result2.publicViewId}`);
+        
+        return {
+            success: hasPublicViewId && preservedPublicViewId,
+            newProfile: result1,
+            updatedProfile: result2,
+            tests: {
+                newProfileHasId: hasPublicViewId,
+                existingProfilePreservesId: preservedPublicViewId
+            }
+        };
+        
+    } catch (error) {
+        console.error("❌ Test failed:", error.message);
+        return {
+            success: false,
+            error: error.message
+        };
+    }
+}
+
+/**
+ * Verify crypto.randomUUID() is working correctly
+ */
+export async function testUUIDGeneration() {
+    console.log("🧪 Testing UUID generation...");
+    
+    try {
+        const cryptoLib = await getCrypto();
+        let uuid1, uuid2;
+        
+        if (cryptoLib && cryptoLib.randomUUID) {
+            uuid1 = cryptoLib.randomUUID();
+            uuid2 = cryptoLib.randomUUID();
+        } else {
+            console.log("Using fallback UUID generation");
+            uuid1 = generateFallbackUUID();
+            uuid2 = generateFallbackUUID();
+        }
+        
+        const validFormat = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+        
+        const uuid1Valid = validFormat.test(uuid1);
+        const uuid2Valid = validFormat.test(uuid2);
+        const unique = uuid1 !== uuid2;
+        
+        console.log(`✅ UUID 1: ${uuid1} (Valid: ${uuid1Valid})`);
+        console.log(`✅ UUID 2: ${uuid2} (Valid: ${uuid2Valid})`);
+        console.log(`✅ Unique: ${unique}`);
+        
+        return {
+            success: uuid1Valid && uuid2Valid && unique,
+            uuid1,
+            uuid2,
+            tests: {
+                uuid1Valid,
+                uuid2Valid,
+                unique
+            }
+        };
+        
+    } catch (error) {
+        console.error("❌ UUID generation test failed:", error.message);
+        return {
+            success: false,
+            error: error.message
+        };
+    }
+}
+
+/**
+ * Run comprehensive verification of the fixed functionality
+ */
+export async function runPaystackUtilsVerification() {
+    console.log("🚀 Running paystack-utils verification...");
+    
+    const results = {
+        timestamp: new Date(),
+        tests: {}
+    };
+    
+    try {
+        // Test UUID generation
+        results.tests.uuidGeneration = testUUIDGeneration();
+        
+        // Test profile upsert and publicViewId handling
+        results.tests.profileUpsert = await testPublicViewIdGeneration();
+        
+        // Overall success
+        results.success = results.tests.uuidGeneration.success && 
+                         results.tests.profileUpsert.success;
+        
+        console.log(`🎯 Verification ${results.success ? 'PASSED' : 'FAILED'}`);
+        
+        return results;
+        
+    } catch (error) {
+        console.error("❌ Verification failed:", error.message);
+        results.success = false;
+        results.error = error.message;
+        return results;
+    }
+}

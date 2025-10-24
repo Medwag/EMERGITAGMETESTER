@@ -1,0 +1,31 @@
+// backend/discord-utils.jsw
+import { fetch } from 'wix-fetch';
+import { getSecret } from 'wix-secrets-backend';
+
+export async function sendDiscordAlert(message, options = {}) {
+  try {
+    const webhookUrl = await getSecret('DISCORD_WEBHOOK_URL');
+    if (!webhookUrl) {
+      console.error("❌ Discord webhook URL not found.");
+      return;
+    }
+
+    const payload = {
+      content: message,
+      username: options.username || 'EmergiTag Bot',
+      embeds: options.embeds || [],
+    };
+
+    const response = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      console.error(`❌ Failed sending Discord alert: ${response.statusText}`);
+    }
+  } catch (error) {
+    console.error("❌ Error sending Discord alert:", error);
+  }
+}

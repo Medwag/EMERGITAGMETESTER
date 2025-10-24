@@ -1,0 +1,327 @@
+// ✅ backend/signup-page-logger.jsw
+// Sign-up Page Visit Logger and Status Manager
+
+import wixData from 'wix-data';
+
+/**
+ * Log user visit to sign-up page and return comprehensive status
+ * @param {string} userId - User ID
+ * @param {string} userEmail - User email
+ * @returns {Promise<object>} Visit log and payment status info
+ */
+export async function logSignupPageVisit(userId, userEmail) {
+    const visitTime = new Date();
+    console.log(`� [Signup Logger] === STARTING LOG VISIT ===`);
+    console.log(`�📋 [Signup Logger] Logging visit for user: ${userId} at ${visitTime.toISOString()}`);
+    console.log(`📧 [Signup Logger] User email: ${userEmail}`);
+    
+    try {
+        console.log(`📊 [Signup Logger] Step 1: Fetching user profile...`);
+        // Get or create user profile for last visit tracking
+        let profile = null;
+        try {
+            const profileQuery = await wixData.query('Emergency_Profiles')
+                .eq('_owner', userId)
+                .limit(1)
+                .find();
+            profile = profileQuery.items.length > 0 ? profileQuery.items[0] : null;
+            console.log(`✅ [Signup Logger] Profile query result:`, { 
+                found: !!profile, 
+                profileId: profile?._id,
+                hasName: !!(profile?.firstName || profile?.fullName),
+                totalProfilesFound: profileQuery.items.length
+            });
+            
+            if (!profile) {
+                console.log(`⚠️ [Signup Logger] No profile found - user likely hasn't completed Emergency Profile setup yet`);
+                // Create a basic profile object for personalization fallback
+                profile = {
+                    _id: null,
+                    _owner: userId,
+                    firstName: null,
+                    lastName: null,
+                    fullName: null,
+                    title: userEmail ? userEmail.split('@')[0] : 'User',
+                    lastSignupPageVisit: null,
+                    signupPageVisitCount: 0
+                };
+                console.log(`🔧 [Signup Logger] Created fallback profile object for personalization`);
+            }
+        } catch (profileErr) {
+            console.error('[Signup Logger] ❌ PROFILE FETCH ERROR:', profileErr);
+            console.error('[Signup Logger] Profile error details:', profileErr.message);
+            // Create fallback profile even on error
+            profile = {
+                _id: null,
+                _owner: userId,
+                firstName: null,
+                lastName: null,
+                fullName: null,
+                title: userEmail ? userEmail.split('@')[0] : 'User',
+                lastSignupPageVisit: null,
+                signupPageVisitCount: 0
+            };
+            console.log(`🔧 [Signup Logger] Created error fallback profile object`);
+        }
+
+        console.log(`📊 [Signup Logger] Step 2: Updating profile visit tracking...`);
+        // Update last visit in profile
+        let lastVisitDate = null;
+        if (profile && profile._id) {
+            lastVisitDate = profile.lastSignupPageVisit ? new Date(profile.lastSignupPageVisit) : null;
+            console.log(`📅 [Signup Logger] Last visit date: ${lastVisitDate}`);
+            
+            // Update profile with current visit (only if profile exists in database)
+            try {
+                const updateData = {
+                    _id: profile._id,
+                    lastSignupPageVisit: visitTime,
+                    signupPageVisitCount: (profile.signupPageVisitCount || 0) + 1
+                };
+                console.log(`📝 [Signup Logger] Updating profile with:`, updateData);
+                
+                await wixData.update('Emergency_Profiles', updateData);
+                console.log(`✅ [Signup Logger] Successfully updated profile visit tracking`);
+            } catch (updateErr) {
+                console.error('[Signup Logger] ❌ PROFILE UPDATE ERROR:', updateErr);
+                console.error('[Signup Logger] Update error details:', updateErr.message);
+                console.warn('[Signup Logger] ⚠️ Could not update profile visit tracking - continuing anyway');
+            }
+        } else {
+            console.log(`⚠️ [Signup Logger] No database profile to update - user likely hasn't created Emergency Profile yet`);
+            console.log(`📋 [Signup Logger] Will still provide personalized experience with fallback profile data`);
+        }
+
+        console.log(`📊 [Signup Logger] Step 3: Logging to SignupPageLogs collection...`);
+        // Log visit in dedicated collection (gracefully handle collection not existing)
+        try {
+            const logEntry = {
+                userId: userId,
+                userEmail: userEmail,
+                visitDate: visitTime,
+                userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : 'Unknown',
+                pageUrl: 'signup',
+                sessionId: `signup_${userId}_${Date.now()}`
+            };
+            console.log(`📝 [Signup Logger] Inserting log entry:`, logEntry);
+            
+            await wixData.insert('SignupPageLogs', logEntry);
+            console.log(`✅ [Signup Logger] Successfully logged visit to SignupPageLogs collection`);
+        } catch (logErr) {
+            console.error('[Signup Logger] ❌ SIGNUPPAGЕЛOGS INSERT ERROR:', logErr);
+            console.error('[Signup Logger] Log error details:', logErr.message);
+            console.warn('[Signup Logger] ⚠️ SignupPageLogs collection may not exist - continuing anyway');
+        }
+
+        console.log(`📊 [Signup Logger] Step 4: Detecting signup payment status...`);
+        // Get signup payment status for log message
+        let signupPaymentInfo = null;
+        try {
+            console.log('[Signup Logger] 🔍 Starting payment detection...');
+            const { detectSignupPayment } = await import('backend/signup-payment-detector-dual.jsw');
+            console.log('[Signup Logger] ✅ Successfully imported detectSignupPayment function');
+            
+            const paymentResult = await detectSignupPayment(userId, {
+                includePartialMatches: true,
+                timeWindow: 90
+            });
+            
+            console.log('[Signup Logger] 📋 Payment detection result:', paymentResult);
+            
+            if (paymentResult.success && paymentResult.paymentDetected && paymentResult.confidence >= 70) {
+                signupPaymentInfo = {
+                    paid: true,
+                    amount: paymentResult.amount || 149.00,
+                    date: paymentResult.paymentDate,
+                    provider: paymentResult.provider,
+                    reference: paymentResult.paymentReference
+                };
+                console.log('[Signup Logger] ✅ Payment CONFIRMED:', signupPaymentInfo);
+            } else {
+                signupPaymentInfo = { paid: false };
+                console.log('[Signup Logger] ❌ NO payment found');
+                console.log('[Signup Logger] Payment result details:', {
+                    success: paymentResult.success,
+                    paymentDetected: paymentResult.paymentDetected,
+                    confidence: paymentResult.confidence
+                });
+            }
+        } catch (paymentErr) {
+            console.error('[Signup Logger] ❌ PAYMENT DETECTION ERROR:', paymentErr);
+            console.error('[Signup Logger] Payment error details:', paymentErr.message);
+            console.error('[Signup Logger] Payment error stack:', paymentErr.stack);
+            signupPaymentInfo = { 
+                paid: false, 
+                error: true,
+                errorMessage: paymentErr.message 
+            };
+        }
+
+        console.log(`📊 [Signup Logger] Step 5: Creating log status message...`);
+        // Create log status message using proper data structure
+        const logStatusData = {
+            lastVisitDate: lastVisitDate,
+            signupPaymentInfo: signupPaymentInfo
+        };
+        const logStatus = formatSignupLogStatus(logStatusData);
+        console.log(`📝 [Signup Logger] Generated log status:`, logStatus);
+
+        console.log(`🎯 [Signup Logger] Step 6: Generating personalized welcome message...`);
+        // Generate personalized welcome message with correct parameters
+        const personalizedMessage = getPersonalizedWelcome(userEmail, profile);
+        console.log(`👋 [Signup Logger] Generated personalized welcome:`, personalizedMessage);
+
+        console.log(`📦 [Signup Logger] Step 7: Preparing final result object...`);
+        const finalResult = {
+            success: true,
+            user: profile,
+            logStatus: logStatus,
+            personalizedWelcome: personalizedMessage,
+            timestamp: visitTime,
+            paymentInfo: signupPaymentInfo,
+            // Legacy compatibility
+            visitTime: visitTime,
+            lastVisitDate: lastVisitDate,
+            signupPaymentInfo: signupPaymentInfo
+        };
+        
+        console.log(`✅ [Signup Logger] FINAL RESULT:`, finalResult);
+        console.log(`🏁 [Signup Logger] === logSignupPageVisit COMPLETED SUCCESSFULLY ===`);
+        
+        return finalResult;
+
+    } catch (error) {
+        console.error('❌ [Signup Logger] Failed to log visit:', error);
+        return {
+            success: false,
+            error: error.message,
+            visitTime: visitTime,
+            signupPaymentInfo: { paid: false, error: true }
+        };
+    }
+}
+
+/**
+ * Get formatted log status message for display
+ * @param {object} logData - Data from logSignupPageVisit
+ * @returns {string} Formatted status message
+ */
+export function formatSignupLogStatus(logData) {
+    console.log(`📝 [formatSignupLogStatus] Starting to format log status...`);
+    console.log(`📋 [formatSignupLogStatus] Input logData:`, logData);
+    
+    let statusMessage = '';
+    
+    console.log(`📅 [formatSignupLogStatus] Checking last visit date...`);
+    // Last visit date
+    if (logData.lastVisitDate) {
+        console.log(`📅 [formatSignupLogStatus] Last visit date found:`, logData.lastVisitDate);
+        const lastVisit = new Date(logData.lastVisitDate);
+        const formatOptions = { 
+            year: 'numeric', 
+            month: 'long', 
+            day: 'numeric', 
+            hour: '2-digit', 
+            minute: '2-digit' 
+        };
+        statusMessage += `📅 Last visit: ${lastVisit.toLocaleDateString('en-ZA', formatOptions)}\n\n`;
+        console.log(`📅 [formatSignupLogStatus] Added last visit message`);
+    } else {
+        console.log(`📅 [formatSignupLogStatus] First visit - adding welcome message`);
+        statusMessage += `📅 Welcome! This is your first visit to the signup page.\n\n`;
+    }
+    
+    console.log(`💰 [formatSignupLogStatus] Checking payment status...`);
+    console.log(`💰 [formatSignupLogStatus] Payment info:`, logData.signupPaymentInfo);
+    
+    // Payment status
+    if (logData.signupPaymentInfo?.paid) {
+        console.log(`✅ [formatSignupLogStatus] Payment confirmed - creating success message`);
+        const amount = logData.signupPaymentInfo.amount || 149.00;
+        const paymentDate = logData.signupPaymentInfo.date ? 
+            new Date(logData.signupPaymentInfo.date).toLocaleDateString('en-ZA', { 
+                year: 'numeric', 
+                month: 'long', 
+                day: 'numeric' 
+            }) : 'Unknown date';
+        
+        statusMessage += `✅ Your EmergiTag.me Sign Up fee of R${amount.toFixed(2)} was paid on: ${paymentDate}`;
+        
+        if (logData.signupPaymentInfo.provider) {
+            statusMessage += ` (via ${logData.signupPaymentInfo.provider})`;
+        }
+        console.log(`✅ [formatSignupLogStatus] Payment success message created`);
+    } else {
+        console.log(`❌ [formatSignupLogStatus] No payment found - adding payment request message`);
+        statusMessage += `💰 Please follow the link below to pay the required sign up fee.\n\n`;
+        statusMessage += `❓ Why does EmergiTag.me require a sign up fee?\n\n`;
+        statusMessage += `The Sign-up Fee covers the basic administrative costs of EmergiTag.me, including the preparation of your welcome pack. `;
+        statusMessage += `The fee covers the courier costs to get your pack to you as fast and as safely as possible. `;
+        statusMessage += `It also includes the standard EmergiTag.me wristband, membership card and stickers.`;
+        console.log(`💰 [formatSignupLogStatus] Payment request message created`);
+    }
+    
+    console.log(`📝 [formatSignupLogStatus] Final formatted message:`, statusMessage);
+    console.log(`✅ [formatSignupLogStatus] Formatting complete`);
+    
+    return statusMessage;
+}
+
+/**
+ * Get personalized welcome message
+ * @param {string} userEmail - User email
+ * @param {object} profile - User profile data
+ * @returns {string} Welcome message
+ */
+export function getPersonalizedWelcome(userEmail, profile = null) {
+    console.log(`👋 [getPersonalizedWelcome] Generating personalized welcome...`);
+    console.log(`📧 [getPersonalizedWelcome] User email:`, userEmail);
+    console.log(`👤 [getPersonalizedWelcome] Profile data:`, profile);
+    
+    const hour = new Date().getHours();
+    const timeOfDay = hour >= 5 && hour < 12 ? 'Good Morning' :
+                     hour >= 12 && hour < 18 ? 'Good Afternoon' :
+                     'Good Evening';
+    
+    console.log(`⏰ [getPersonalizedWelcome] Time of day: ${timeOfDay} (hour: ${hour})`);
+    
+    let userName = '';
+    
+    // Try to get name from profile
+    if (profile) {
+        console.log(`👤 [getPersonalizedWelcome] Profile found - extracting name...`);
+        if (profile.firstName && profile.lastName) {
+            userName = `${profile.firstName} ${profile.lastName}`;
+            console.log(`✅ [getPersonalizedWelcome] Full name found: ${userName}`);
+        } else if (profile.fullName) {
+            userName = profile.fullName;
+            console.log(`✅ [getPersonalizedWelcome] Full name field found: ${userName}`);
+        } else if (profile.firstName) {
+            userName = profile.firstName;
+            console.log(`✅ [getPersonalizedWelcome] First name found: ${userName}`);
+        } else {
+            console.log(`⚠️ [getPersonalizedWelcome] No name fields in profile`);
+        }
+    } else {
+        console.log(`⚠️ [getPersonalizedWelcome] No profile provided`);
+    }
+    
+    // Fallback to email username if no name found
+    if (!userName && userEmail) {
+        console.log(`📧 [getPersonalizedWelcome] Using email fallback...`);
+        userName = userEmail.split('@')[0];
+        userName = userName.charAt(0).toUpperCase() + userName.slice(1);
+        console.log(`✅ [getPersonalizedWelcome] Email-based name: ${userName}`);
+    }
+    
+    // Final fallback
+    if (!userName) {
+        console.log(`⚠️ [getPersonalizedWelcome] Using final fallback name`);
+        userName = 'Valued Client';
+    }
+    
+    const finalMessage = `${timeOfDay}, ${userName}! 🌟`;
+    console.log(`🎯 [getPersonalizedWelcome] Final welcome message: ${finalMessage}`);
+    
+    return finalMessage;
+}

@@ -1,0 +1,446 @@
+// === backend/profile-utils.jsw ===
+import wixData from 'wix-data';
+import wixUsersBackend from 'wix-users-backend';
+import { getSecret } from 'wix-secrets-backend';
+import { sendSignUpMessage, sendSubscriptionSuccess } from 'backend/whatsapp.jsw';
+import { sendWelcomeEmailToClient, notifyAdminOfNewProfile, logSubscriptionToCMS, emailClientSubscriptionActive } from 'backend/email-utils.jsw';
+// import { createSignupPayment } from 'backend/paystackUrl.jsw'; // No longer needed - dual payment gateway handles this
+import { createPaystackCustomer } from 'backend/createPaystackCustomer.jsw';
+
+// Safe crypto import - only load when needed
+let crypto = null;
+async function getCrypto() {
+    if (!crypto) {
+        try {
+            crypto = await import('crypto');
+            return crypto;
+        } catch (err) {
+            console.warn('Crypto module not available, using fallback:', err.message);
+            return null;
+        }
+    }
+    return crypto;
+}
+
+/** --- Append-only backup + audit logger --- */
+export async function logProfileChange(profile, action = "update", reason = "auto") {
+    if (!profile || !profile._id) return;
+
+    const profileId = profile._id;
+    const user = wixUsersBackend.currentUser;
+    const userId = user?.id || profile.userId || "system";
+
+    // Check for recent backups to prevent spamming (within last 5 minutes)
+    try {
+        const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
+        const recentBackups = await wixData.query("Emergency_Profiles_Backup")
+            .eq("originalProfileId", profileId)
+            .gt("backupTimestamp", fiveMinutesAgo)
+            .limit(1)
+            .find({ suppressAuth: true });
+        
+        if (recentBackups.items.length > 0) {
+            console.log(`⏳ Skipping backup for profile ${profileId} - recent backup exists`);
+            return; // Skip backup if one was created recently
+        }
+    } catch (checkErr) {
+        console.warn('Could not check for recent backups, proceeding:', checkErr.message);
+    }
+
+    // Create backup entry without _id to avoid duplicates
+    const { _id, ...profileDataWithoutId } = profile;
+    const backupEntry = { 
+        ...profileDataWithoutId, 
+        originalProfileId: profileId,  // Store original ID separately
+        profileId, 
+        backupTimestamp: new Date(), 
+        backupReason: reason 
+    };
+    
+    try {
+        await wixData.insert("Emergency_Profiles_Backup", backupEntry);
+        console.log(`✅ Backup saved for profile ${profileId}`);
+    } catch (err) {
+        console.error(`❌ Backup insert failed for profile ${profileId}:`, err);
+        // Don't throw - backup failure shouldn't break main operations
+    }
+
+    const auditEntry = {
+        profileId,
+        action,
+        changedBy: userId,
+        timestamp: new Date(),
+        dataSnapshot: JSON.stringify(profile, null, 2)
+    };
+    try {
+        await wixData.insert("Emergency_Profiles_Audit", auditEntry);
+        console.log(`📜 Audit log written for profile ${profileId} (${action})`);
+    } catch (err) {
+        console.warn(`⚠️ Audit logging skipped for profile ${profileId} (${action}): ${err.message}`);
+        // Don't throw error - audit logging is optional, main operation should continue
+    }
+}
+
+/** --- Create or update a profile --- */
+export async function saveEmergencyProfile(profileData) {
+    const { userId, email, fullName, phone, whatsAppNumber, smsConsent, waConsent, homeAddress, deliveryAddress } = profileData;
+
+    // Load or create base profile
+    const profileQuery = await wixData.query("Emergency_Profiles").eq("_owner", userId).limit(1).find({ suppressAuth: true });
+    let baseProfile = profileQuery.items[0];
+
+    // Generate publicViewId safely
+    let publicViewId = baseProfile?.publicViewId;
+    if (!publicViewId) {
+        const cryptoModule = await getCrypto();
+        if (cryptoModule && cryptoModule.randomUUID) {
+            publicViewId = cryptoModule.randomUUID();
+        } else {
+            // Fallback UUID generation
+            publicViewId = `emergitag-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+        }
+    }
+
+    const profileToSave = {
+        ...baseProfile,
+        _owner: userId,
+        userId,
+        fullName,
+        emailAddress: email,
+        phone,
+        whatsAppNumber,
+        smsConsent,
+        waConsent,
+        homeAddress,
+        deliveryAddress,
+        signUpPaid: false,
+        dateCreated: baseProfile?.dateCreated || new Date(),
+        updatedAt: new Date(),
+        publicViewId: publicViewId
+    };
+
+    let savedProfile;
+    if (baseProfile?._id) {
+        profileToSave._id = baseProfile._id;
+        savedProfile = await wixData.update("Emergency_Profiles", profileToSave, { suppressAuth: true });
+        await logProfileChange(savedProfile, "update", "user submitted data");
+    } else {
+        savedProfile = await wixData.insert("Emergency_Profiles", profileToSave, { suppressAuth: true });
+        await logProfileChange(savedProfile, "insert", "initial insert");
+    }
+
+    // --- Create Paystack customer ---
+    try {
+        await createPaystackCustomer(email, userId);
+        console.log(`✅ Paystack customer created for ${email}`);
+    } catch (err) {
+        console.error(`❌ Paystack customer creation failed for ${email}:`, err);
+    }
+
+    // --- NOTE: WhatsApp welcome moved to AFTER payment confirmation ---
+    // WhatsApp and email notifications will be sent via webhook after successful payment
+    // This prevents premature notifications before payment is completed
+    
+    console.log(`📝 Profile created for ${fullName} - awaiting payment confirmation for notifications`);
+    
+    // --- Only Admin notification for profile creation (not payment-related) ---
+    try {
+        await notifyAdminOfNewProfile(email, userId, "New EmergiTag profile created - awaiting payment");
+    } catch (err) {
+        console.warn(`⚠️ Admin notification failed for user ${userId}:`, err);
+    }
+
+    // --- Note: Payment URL creation now happens in frontend via dual payment gateway ---
+    // Users select their preferred payment method (Paystack or PayFast) via PaymentMethodSelector lightbox
+    // WhatsApp and email notifications are sent AFTER payment confirmation via sendPostPaymentNotifications()
+    
+    return { savedProfile };
+}
+
+/**
+ * Send WhatsApp and Email notifications AFTER payment confirmation
+ * @param {string} userId - User ID
+ * @param {string} paymentReference - Payment reference for tracking
+ * @returns {Promise<object>} Notification results
+ */
+export async function sendPostPaymentNotifications(userId, paymentReference = null) {
+    console.log(`🎉 [Post-Payment] Sending welcome notifications for user ${userId}`);
+    
+    try {
+        // Get user profile
+        const profileQuery = await wixData.query('Emergency_Profiles')
+            .eq('_owner', userId)
+            .limit(1)
+            .find();
+        
+        if (profileQuery.items.length === 0) {
+            throw new Error('Profile not found for post-payment notifications');
+        }
+        
+        const profile = profileQuery.items[0];
+        const { fullName, phone, whatsAppNumber, waConsent, email } = profile;
+        
+        const results = {
+            whatsAppSent: false,
+            emailSent: false,
+            adminNotified: false,
+            errors: []
+        };
+        
+        // --- WhatsApp welcome (only if consented and payment confirmed) ---
+        if (waConsent && (whatsAppNumber || phone)) {
+            try {
+                await sendSignUpMessage({ 
+                    phone: whatsAppNumber || phone, 
+                    fullName,
+                    paymentReference 
+                });
+                results.whatsAppSent = true;
+                console.log(`✅ [Post-Payment] WhatsApp welcome sent to ${fullName}`);
+            } catch (err) {
+                console.error(`❌ [Post-Payment] WhatsApp welcome failed for ${fullName}:`, err);
+                results.errors.push(`WhatsApp: ${err.message}`);
+            }
+        }
+        
+        // --- Email welcome (after payment confirmation) ---
+        try {
+            await sendWelcomeEmailToClient(userId, paymentReference);
+            results.emailSent = true;
+            console.log(`✅ [Post-Payment] Welcome email sent to user ${userId}`);
+        } catch (err) {
+            console.error(`❌ [Post-Payment] Welcome email failed for user ${userId}:`, err);
+            results.errors.push(`Email: ${err.message}`);
+        }
+        
+        // --- Admin notification for successful signup ---
+        try {
+            await notifyAdminOfNewProfile(email, userId, `Signup completed - Payment confirmed (${paymentReference})`);
+            results.adminNotified = true;
+            console.log(`✅ [Post-Payment] Admin notified of successful signup for ${email}`);
+        } catch (err) {
+            console.error(`❌ [Post-Payment] Admin notification failed for user ${userId}:`, err);
+            results.errors.push(`Admin notification: ${err.message}`);
+        }
+        
+        // Update profile with notification status
+        try {
+            await wixData.update('Emergency_Profiles', {
+                _id: profile._id,
+                signUpPaid: true,
+                signUpReference: paymentReference,
+                lastPaymentDate: new Date(),
+                notificationsSent: new Date(),
+                welcomeEmailSent: results.emailSent,
+                welcomeWhatsAppSent: results.whatsAppSent
+            });
+            console.log(`✅ [Post-Payment] Profile updated with notification status`);
+        } catch (updateErr) {
+            console.warn(`⚠️ [Post-Payment] Could not update profile notification status:`, updateErr);
+        }
+        
+        console.log(`🎉 [Post-Payment] Notification process complete for ${fullName}`);
+        return results;
+        
+    } catch (error) {
+        console.error(`❌ [Post-Payment] Critical error in notification process:`, error);
+        return {
+            whatsAppSent: false,
+            emailSent: false,
+            adminNotified: false,
+            errors: [error.message]
+        };
+    }
+}
+
+/** --- Handle subscription success webhook --- */
+export async function handleSubscriptionSuccess(data) {
+    try {
+        const userId = data.metadata?.userId;
+        const planName = data.metadata?.planName;
+
+        if (!userId || !planName) throw new Error("Missing userId or planName in webhook metadata");
+
+        // Get profile
+        const profileQuery = await wixData.query("Emergency_Profiles").eq("_owner", userId).limit(1).find({ suppressAuth: true });
+        let profile = profileQuery.items[0];
+
+        if (!profile) {
+            // Generate publicViewId safely
+            const cryptoModule = await getCrypto();
+            let publicViewId;
+            if (cryptoModule && cryptoModule.randomUUID) {
+                publicViewId = cryptoModule.randomUUID();
+            } else {
+                // Fallback UUID generation
+                publicViewId = `emergitag-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+            }
+
+            profile = await wixData.insert("Emergency_Profiles", {
+                _owner: userId,
+                userId,
+                fullName: data.metadata?.fullName || "Member",
+                emailAddress: data.customer?.email || "unknown@example.com",
+                publicViewId: publicViewId,
+                dateCreated: new Date()
+            }, { suppressAuth: true });
+        }
+
+        // Update profile with subscription info
+        profile.membershipTier = planName;
+        profile.planStatus = "active";
+        profile.lastPaymentDate = new Date(data.paid_at || new Date());
+
+        await wixData.update("Emergency_Profiles", profile, { suppressAuth: true });
+        await logProfileChange(profile, "subscription", "first payment success");
+
+        // Log subscription in CMS & Discord
+        await logSubscriptionToCMS({
+            userId,
+            email: profile.emailAddress,
+            membershipTier: planName,
+            reference: data.reference,
+            amount: data.amount / 100
+        });
+
+        // Send WhatsApp subscription success
+        await sendSubscriptionSuccess(profile, {
+            planName,
+            activatedDate: new Date().toDateString(),
+            dashboardLink: "https://www.emergitag.me/dashboard"
+        });
+
+        // Optionally: send subscription confirmation email
+        if (typeof emailClientSubscriptionActive === "function") {
+            await emailClientSubscriptionActive(userId, planName);
+        }
+
+    } catch (err) {
+        console.error("❌ handleSubscriptionSuccess error:", err);
+    }
+}
+
+/** --- Create or Get Emergency Profile by User ID --- */
+export async function createOrGetEmergencyProfile(userId) {
+    if (!userId) {
+        throw new Error('User ID is required');
+    }
+
+    try {
+        // First, try to find existing profile by _owner (userId)
+        const existingProfileQuery = await wixData.query("Emergency_Profiles")
+            .eq("_owner", userId)
+            .limit(1)
+            .find({ suppressAuth: true });
+
+        if (existingProfileQuery.items.length > 0) {
+            console.log(`✅ Found existing profile for user ${userId} - NO WhatsApp/Email sent`);
+            return existingProfileQuery.items[0];
+        }
+
+        // No existing profile found, get user details to create new one
+        const user = await wixUsersBackend.getUser(userId);
+        if (!user) {
+            throw new Error(`User not found for ID: ${userId}`);
+        }
+
+        const userEmail = user.loginEmail || user.email;
+        if (!userEmail) {
+            throw new Error(`No email found for user ID: ${userId}`);
+        }
+
+        // Create new profile with enhanced default values - NO WELCOME MESSAGES
+        const newProfile = {
+            _owner: userId,
+            email: userEmail,
+            emailAddress: userEmail,
+            fullName: user.firstName && user.lastName ? `${user.firstName} ${user.lastName}` : '',
+            signUpPaid: false,        // Your signUpPaid field
+            signUpReference: null,    // Your signUpReference field
+            subscriptionActive: false,
+            planStatus: null,         // Your planStatus field
+            membershipTier: null,     // Your membershipTier field
+            joinedDate: null,         // Your joinedDate field (will be set when signup is paid)
+            lastPaymentDate: null,    // Your lastPaymentDate field
+            paystackCustomerCode: null, // Your paystackCustomerCode field
+            publicViewId: await generatePublicViewId(),
+            createDate: new Date(),
+            dateCreated: new Date(),
+            smsConsent: false,
+            waConsent: false,
+            welcomeMessageSent: false  // Track if welcome message was sent
+        };
+
+        const createdProfile = await wixData.insert("Emergency_Profiles", newProfile, { suppressAuth: true });
+        await logProfileChange(createdProfile, "insert", "auto-created - no welcome messages sent");
+        
+        console.log(`✅ Created new profile for user ${userId} - NO welcome messages sent (to prevent spam)`);
+        return createdProfile;
+
+    } catch (err) {
+        console.error(`❌ createOrGetEmergencyProfile failed for user ${userId}:`, err);
+        throw err;
+    }
+}
+
+/** --- Send welcome messages for genuine new signups only --- */
+export async function sendWelcomeMessages(userId, profileData) {
+    const { email, fullName, phone, whatsAppNumber, smsConsent, waConsent } = profileData;
+    
+    try {
+        // Check if welcome messages were already sent
+        const profileQuery = await wixData.query("Emergency_Profiles")
+            .eq("_owner", userId)
+            .limit(1)
+            .find({ suppressAuth: true });
+            
+        if (profileQuery.items.length > 0) {
+            const profile = profileQuery.items[0];
+            if (profile.welcomeMessageSent) {
+                console.log(`⚠️ Welcome messages already sent for user ${userId} - skipping to prevent duplicates`);
+                return { success: true, message: 'Welcome messages already sent' };
+            }
+        }
+
+        // Send WhatsApp welcome if consented
+        if (waConsent && (whatsAppNumber || phone)) {
+            try {
+                await sendSignUpMessage({ phone: whatsAppNumber || phone, fullName });
+                console.log(`✅ WhatsApp welcome sent to ${fullName}`);
+            } catch (err) {
+                console.warn(`⚠️ WhatsApp welcome message failed for ${fullName}:`, err);
+            }
+        }
+
+        // Send welcome email
+        try {
+            await sendWelcomeEmailToClient(userId);
+            console.log(`✅ Welcome email sent to ${email}`);
+        } catch (err) {
+            console.warn(`⚠️ Welcome email failed for ${email}:`, err);
+        }
+
+        // Mark welcome messages as sent
+        if (profileQuery.items.length > 0) {
+            await wixData.update("Emergency_Profiles", {
+                _id: profileQuery.items[0]._id,
+                welcomeMessageSent: true,
+                welcomeMessageDate: new Date()
+            }, { suppressAuth: true });
+        }
+
+        return { success: true, message: 'Welcome messages sent successfully' };
+
+    } catch (err) {
+        console.error(`❌ sendWelcomeMessages failed for user ${userId}:`, err);
+        return { success: false, error: err.message };
+    }
+}
+async function generatePublicViewId() {
+    const crypto = await getCrypto();
+    if (crypto) {
+        return crypto.randomBytes(8).toString('hex');
+    }
+    // Fallback if crypto is not available
+    return Math.random().toString(36).substring(2, 10) + Date.now().toString(36);
+}

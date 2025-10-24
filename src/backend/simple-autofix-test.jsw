@@ -1,0 +1,125 @@
+// Simple AutoFix Test - backend/simple-autofix-test.jsw
+import { verifyOrRecoverPaystackTransaction } from 'backend/verifyOrRecoverPaystackTransaction.jsw';
+import wixData from 'wix-data';
+
+/**
+ * Simple test function to verify Paystack recovery for a given email
+ * This bypasses the complex autofix chain and tests our enhanced verification directly
+ */
+export async function testPaystackRecovery(email) {
+    console.log(`🧪 SIMPLE TEST: Starting Paystack recovery test for: ${email}`);
+    console.log(`⏰ Test started at: ${new Date().toISOString()}`);
+    
+    try {
+        // Test our enhanced verification function directly
+        const result = await verifyOrRecoverPaystackTransaction(email);
+        
+        console.log(`✅ TEST COMPLETED: Result for ${email}:`, result);
+        
+        // Also check what profile was created/updated
+        const profiles = await wixData.query("Emergency_Profiles")
+            .eq("emailAddress", email)
+            .limit(5)
+            .find({ suppressAuth: true });
+            
+        console.log(`📊 Found ${profiles.items.length} profile(s) for ${email}:`);
+        profiles.items.forEach((profile, index) => {
+            console.log(`Profile ${index + 1}:`, {
+                _id: profile._id,
+                _owner: profile._owner,
+                emailAddress: profile.emailAddress,
+                membershipTier: profile.membershipTier,
+                subscriptionPaid: profile.subscriptionPaid,
+                subscriptionActive: profile.subscriptionActive,
+                planStatus: profile.planStatus,
+                paystackSubscriptionCode: profile.paystackSubscriptionCode,
+                customer_code: profile.customer_code
+            });
+        });
+        
+        return {
+            success: true,
+            paystack_result: result,
+            profiles_found: profiles.items.length,
+            profiles: profiles.items
+        };
+        
+    } catch (error) {
+        console.error(`❌ TEST FAILED for ${email}:`, error.message);
+        console.error('Full error:', error);
+        
+        return {
+            success: false,
+            error: error.message,
+            full_error: error
+        };
+    }
+}
+
+/**
+ * Test with your specific client email
+ * Replace "your-client@example.com" with the actual email
+ */
+export async function testLiveClientEmail() {
+    // Get client email from environment variable or config
+    const clientEmail = process.env.CLIENT_EMAIL || "your-client@example.com"; 
+    
+    if (clientEmail === "your-client@example.com") {
+        console.warn("⚠️ WARNING: Using placeholder email. Set CLIENT_EMAIL environment variable for production use.");
+    }
+
+    console.log(`🎯 TESTING LIVE CLIENT: ${clientEmail}`);
+    return await testPaystackRecovery(clientEmail);
+}
+
+/**
+ * Get diagnostic info about current profiles
+ */
+export async function getDiagnosticInfo() {
+    console.log(`🔍 DIAGNOSTIC: Getting system overview...`);
+    
+    try {
+        // Get recent profiles
+        const recentProfiles = await wixData.query("Emergency_Profiles")
+            .descending("_dateCreated")
+            .limit(10)
+            .find({ suppressAuth: true });
+            
+        console.log(`📊 Found ${recentProfiles.items.length} recent profiles:`);
+        recentProfiles.items.forEach((profile, index) => {
+            console.log(`Recent Profile ${index + 1}:`, {
+                _id: profile._id,
+                emailAddress: profile.emailAddress,
+                membershipTier: profile.membershipTier,
+                subscriptionActive: profile.subscriptionActive,
+                dateCreated: profile._dateCreated
+            });
+        });
+        
+        // Get recent transactions
+        const recentTransactions = await wixData.query("PaystackTransactions")
+            .descending("_dateCreated")
+            .limit(5)
+            .find({ suppressAuth: true });
+            
+        console.log(`💳 Found ${recentTransactions.items.length} recent transactions:`);
+        recentTransactions.items.forEach((tx, index) => {
+            console.log(`Transaction ${index + 1}:`, {
+                _id: tx._id,
+                email: tx.email,
+                amount: tx.amount,
+                status: tx.status,
+                dateCreated: tx._dateCreated
+            });
+        });
+        
+        return {
+            recent_profiles: recentProfiles.items,
+            recent_transactions: recentTransactions.items
+        };
+        
+    } catch (error) {
+        console.error(`❌ DIAGNOSTIC FAILED:`, error.message);
+        return { error: error.message };
+    }
+}

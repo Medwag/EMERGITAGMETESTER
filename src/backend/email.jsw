@@ -1,0 +1,23 @@
+// backend/email.jsw
+import wixCRM from 'wix-crm-backend';
+
+// === Send Email Alert ===
+export async function sendEmailAlert(toEmail, subject, bodyText) {
+  try {
+    if (!toEmail || !subject || !bodyText) {
+      console.warn("⚠️ Missing email parameters");
+      return;
+    }
+
+    await wixCRM.emailContact("default", {
+      to: toEmail,
+      subject: subject,
+      body: bodyText
+    });
+
+    console.log(`📧 Email alert sent to ${toEmail} | Subject: ${subject}`);
+    
+  } catch (err) {
+    console.error("❌ Error sending email alert:", err);
+  }
+}

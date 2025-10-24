@@ -1,0 +1,8 @@
+// backend/emailClient.jsw
+import { triggeredEmails } from 'wix-crm-backend';
+
+export async function sendSignupConfirmationEmail(contactId, data) {
+  return triggeredEmails.emailId("UrDYTwt") // Replace with your actual email ID
+    .recipient(contactId)
+    .send(data);
+}

@@ -1,0 +1,220 @@
+// Comprehensive PayFast Diagnostic Tool
+// This will help identify the exact cause of the "glitch" error
+
+import { getSecret } from 'wix-secrets-backend';
+import crypto from 'crypto';
+
+export async function comprehensivePayFastDiagnostic() {
+  console.log('🔍 COMPREHENSIVE PAYFAST DIAGNOSTIC');
+  console.log('====================================');
+  
+  const diagnostic = {
+    timestamp: new Date().toISOString(),
+    tests: [],
+    recommendations: [],
+    status: 'unknown'
+  };
+  
+  try {
+    // Test 1: Credential Validation
+    console.log('\n📋 TEST 1: Credential Validation');
+    const merchantId = await getSecret('payfast_merchant_id');
+    const merchantKey = await getSecret('payfast_merchant_key');
+    const passphrase = await getSecret('payfast_passphrase');
+    
+    const credTest = {
+      name: 'Credential Validation',
+      merchantId: {
+        value: merchantId,
+        type: typeof merchantId,
+        isValid: !!(merchantId && !isNaN(parseInt(merchantId, 10)))
+      },
+      merchantKey: {
+        value: merchantKey ? `${merchantKey.substring(0, 3)}...${merchantKey.substring(-3)}` : 'missing',
+        length: merchantKey ? merchantKey.length : 0,
+        isValid: !!(merchantKey && merchantKey.length === 13)
+      },
+      passphrase: {
+        present: !!passphrase,
+        length: passphrase ? passphrase.length : 0
+      }
+    };
+    
+    diagnostic.tests.push(credTest);
+    console.log('Merchant ID:', credTest.merchantId.isValid ? '✅ Valid' : '❌ Invalid');
+    console.log('Merchant Key:', credTest.merchantKey.isValid ? '✅ Valid' : '❌ Invalid');
+    console.log('Passphrase:', credTest.passphrase.present ? '✅ Present' : '⚠️ Missing');
+    
+    // Test 2: URL Construction
+    console.log('\n📋 TEST 2: URL Construction');
+    const testParams = {
+      merchant_id: parseInt(merchantId, 10),
+      merchant_key: merchantKey,
+      amount: '149.00',
+      item_name: 'EmergiTag Signup Fee',
+      return_url: 'https://www.emergitag.me/signup-success',
+      cancel_url: 'https://www.emergitag.me/signup-cancelled',
+      notify_url: 'https://www.emergitag.me/_functions/payfastWebhook',
+      name_first: 'EmergiTag',
+      name_last: 'Member',
+      email_address: 'test@emergitag.me',
+      m_payment_id: `DIAG_${Date.now()}`
+    };
+    
+    // Test 3: Signature Generation
+    console.log('\n📋 TEST 3: Signature Generation');
+    const sortedKeys = Object.keys(testParams).sort();
+    const signatureString = sortedKeys
+      .map(key => `${key}=${encodeURIComponent(String(testParams[key]))}`)
+      .join('&');
+    
+    const signatureWithPassphrase = passphrase ? 
+      `${signatureString}&passphrase=${encodeURIComponent(passphrase)}` : 
+      signatureString;
+    
+    const signature = crypto.createHash('md5').update(signatureWithPassphrase, 'utf8').digest('hex');
+    
+    const sigTest = {
+      name: 'Signature Generation',
+      signatureString: signatureString.substring(0, 100) + '...',
+      withPassphrase: !!passphrase,
+      signature: signature,
+      isValid: !!(signature && signature.length === 32)
+    };
+    
+    diagnostic.tests.push(sigTest);
+    console.log('Signature String Length:', signatureString.length);
+    console.log('Uses Passphrase:', sigTest.withPassphrase);
+    console.log('Generated Signature:', signature);
+    console.log('Signature Valid:', sigTest.isValid ? '✅ Yes' : '❌ No');
+    
+    // Test 4: Complete URL Generation
+    console.log('\n📋 TEST 4: Complete URL Generation');
+    testParams.signature = signature;
+    
+    const sandboxUrl = 'https://sandbox.payfast.co.za/eng/process';
+    const liveUrl = 'https://www.payfast.co.za/eng/process';
+    
+    const queryString = Object.keys(testParams)
+      .sort()
+      .map(k => `${k}=${encodeURIComponent(String(testParams[k]))}`)
+      .join('&');
+    
+    const sandboxFullUrl = `${sandboxUrl}?${queryString}`;
+    const liveFullUrl = `${liveUrl}?${queryString}`;
+    
+    const urlTest = {
+      name: 'URL Generation',
+      sandboxUrl: sandboxFullUrl,
+      liveUrl: liveFullUrl,
+      queryParams: Object.keys(testParams).length,
+      urlLength: sandboxFullUrl.length
+    };
+    
+    diagnostic.tests.push(urlTest);
+    console.log('Parameters Count:', urlTest.queryParams);
+    console.log('Sandbox URL Length:', sandboxFullUrl.length);
+    console.log('Live URL Length:', liveFullUrl.length);
+    
+    // Test 5: Known Issues Check
+    console.log('\n📋 TEST 5: Known Issues Check');
+    const knownIssues = [];
+    
+    if (merchantId === '10000100' && merchantKey === '46f0cd694581a') {
+      knownIssues.push('Using PayFast default sandbox credentials - may have restrictions');
+    }
+    
+    if (!passphrase) {
+      knownIssues.push('No passphrase configured - some PayFast accounts require this');
+    }
+    
+    if (parseInt(merchantId, 10) !== 10000100 && sandboxFullUrl.includes('sandbox')) {
+      knownIssues.push('Using live merchant ID with sandbox URL - potential mismatch');
+    }
+    
+    diagnostic.knownIssues = knownIssues;
+    knownIssues.forEach(issue => console.log('⚠️', issue));
+    
+    // Generate Recommendations
+    if (!credTest.merchantId.isValid) {
+      diagnostic.recommendations.push('Fix merchant_id: must be valid integer');
+    }
+    if (!credTest.merchantKey.isValid) {
+      diagnostic.recommendations.push('Fix merchant_key: must be exactly 13 characters');
+    }
+    if (knownIssues.length > 0) {
+      diagnostic.recommendations.push('Address known configuration issues listed above');
+    }
+    if (merchantId !== '10000100') {
+      diagnostic.recommendations.push('Try with PayFast default sandbox credentials first: 10000100 / 46f0cd694581a');
+    }
+    
+    diagnostic.status = diagnostic.recommendations.length === 0 ? 'healthy' : 'issues_detected';
+    
+    console.log('\n🎯 DIAGNOSTIC SUMMARY');
+    console.log('Status:', diagnostic.status === 'healthy' ? '✅ HEALTHY' : '⚠️ ISSUES DETECTED');
+    console.log('Recommendations:', diagnostic.recommendations.length);
+    
+    return {
+      success: true,
+      diagnostic,
+      sandboxUrl: sandboxFullUrl,
+      liveUrl: liveFullUrl
+    };
+    
+  } catch (error) {
+    console.error('❌ Diagnostic failed:', error);
+    diagnostic.error = error.message;
+    diagnostic.status = 'error';
+    
+    return {
+      success: false,
+      error: error.message,
+      diagnostic
+    };
+  }
+}
+
+// Create URLs with PayFast default sandbox credentials for testing
+export async function createTestUrlWithDefaults() {
+  console.log('🧪 Creating test URL with PayFast default credentials');
+  
+  const defaultParams = {
+    merchant_id: 10000100,
+    merchant_key: '46f0cd694581a',
+    amount: '149.00',
+    item_name: 'EmergiTag Signup Fee',
+    return_url: 'https://www.emergitag.me/signup-success',
+    cancel_url: 'https://www.emergitag.me/signup-cancelled', 
+    notify_url: 'https://www.emergitag.me/_functions/payfastWebhook',
+    name_first: 'EmergiTag',
+    name_last: 'Member',
+    email_address: 'test@emergitag.me',
+    m_payment_id: `DEFAULT_${Date.now()}`
+  };
+  
+  // Generate signature without passphrase (default sandbox doesn't use one)
+  const sortedKeys = Object.keys(defaultParams).sort();
+  const signatureString = sortedKeys
+    .map(key => `${key}=${encodeURIComponent(String(defaultParams[key]))}`)
+    .join('&');
+  
+  const signature = crypto.createHash('md5').update(signatureString, 'utf8').digest('hex');
+  defaultParams.signature = signature;
+  
+  const queryString = Object.keys(defaultParams)
+    .sort()
+    .map(k => `${k}=${encodeURIComponent(String(defaultParams[k]))}`)
+    .join('&');
+  
+  const testUrl = `https://sandbox.payfast.co.za/eng/process?${queryString}`;
+  
+  console.log('🔗 Default sandbox test URL generated');
+  console.log('Length:', testUrl.length);
+  
+  return {
+    success: true,
+    url: testUrl,
+    note: 'Uses PayFast default sandbox credentials'
+  };
+}

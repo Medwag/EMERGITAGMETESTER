@@ -1,0 +1,241 @@
+// Ultimate PayFast Diagnostic
+// This will tell us exactly what's wrong
+
+import { getSecret } from 'wix-secrets-backend';
+
+export async function ultimatePayFastDiagnostic() {
+  console.log('🔍 ULTIMATE PAYFAST DIAGNOSTIC');
+  console.log('==============================');
+  
+  const diagnostic = {
+    timestamp: new Date().toISOString(),
+    step1_secrets: {},
+    step2_environment: {},
+    step3_config: {},
+    step4_analysis: {},
+    recommendations: []
+  };
+  
+  try {
+    // STEP 1: Raw secret values
+    console.log('\n📋 STEP 1: CHECKING RAW SECRET VALUES');
+    console.log('=====================================');
+    
+    const secretNames = ['payfastEnvironment', 'payfast_merchant_id', 'payfast_merchant_key', 'payfast_passphrase'];
+    
+    for (const secretName of secretNames) {
+      console.log(`\nChecking ${secretName}...`);
+      try {
+        const rawValue = await getSecret(secretName);
+        
+        const secretInfo = {
+          found: true,
+          rawValue: rawValue,
+          type: typeof rawValue,
+          length: rawValue?.length || 0,
+          hasWhitespace: rawValue !== rawValue?.trim(),
+          trimmed: rawValue?.trim(),
+          lowercase: rawValue?.toLowerCase(),
+          uppercase: rawValue?.toUpperCase()
+        };
+        
+        // Special checks for specific secrets
+        if (secretName === 'payfastEnvironment') {
+          secretInfo.isExactlyLive = rawValue === 'live';
+          secretInfo.isLiveLowercase = rawValue?.toLowerCase() === 'live';
+          secretInfo.isLiveTrimmed = rawValue?.trim().toLowerCase() === 'live';
+        }
+        
+        if (secretName === 'payfast_merchant_id') {
+          secretInfo.parsed = parseInt(rawValue, 10);
+          secretInfo.isSandboxId = parseInt(rawValue, 10) === 10000100;
+        }
+        
+        if (secretName === 'payfast_merchant_key') {
+          secretInfo.isSandboxKey = rawValue === '46f0cd694581a';
+          secretInfo.preview = rawValue?.substring(0, 5) + '...';
+        }
+        
+        diagnostic.step1_secrets[secretName] = secretInfo;
+        
+        console.log(`✅ Found: ${rawValue}`);
+        console.log(`✅ Type: ${typeof rawValue}`);
+        console.log(`✅ Length: ${rawValue?.length || 0}`);
+        
+        if (secretName === 'payfastEnvironment') {
+          console.log(`✅ Exactly "live": ${secretInfo.isExactlyLive}`);
+          console.log(`✅ Lowercase "live": ${secretInfo.isLiveLowercase}`);
+          console.log(`✅ Trimmed+lowercase "live": ${secretInfo.isLiveTrimmed}`);
+        }
+        
+      } catch (error) {
+        diagnostic.step1_secrets[secretName] = {
+          found: false,
+          error: error.message
+        };
+        console.log(`❌ NOT FOUND: ${error.message}`);
+      }
+    }
+    
+    // STEP 2: Environment Detection Logic
+    console.log('\n🎯 STEP 2: ENVIRONMENT DETECTION LOGIC');
+    console.log('======================================');
+    
+    const envSecret = diagnostic.step1_secrets.payfastEnvironment;
+    if (envSecret?.found) {
+      const envValue = envSecret.rawValue;
+      
+      // Test the exact logic from payfast-config-fixed.jsw
+      const detectedEnv = envValue && envValue.toLowerCase() === 'live' ? 'live' : 'sandbox';
+      
+      diagnostic.step2_environment = {
+        rawValue: envValue,
+        processedValue: envValue?.toLowerCase(),
+        logicResult: detectedEnv,
+        isLive: detectedEnv === 'live',
+        logicSteps: {
+          step1_exists: !!envValue,
+          step2_lowercase: envValue?.toLowerCase(),
+          step3_equals_live: envValue?.toLowerCase() === 'live',
+          step4_result: detectedEnv
+        }
+      };
+      
+      console.log(`Raw environment value: "${envValue}"`);
+      console.log(`Processed (lowercase): "${envValue?.toLowerCase()}"`);
+      console.log(`Logic result: ${detectedEnv}`);
+      console.log(`Is Live: ${detectedEnv === 'live'}`);
+      
+    } else {
+      diagnostic.step2_environment = {
+        error: 'Environment secret not found',
+        defaultResult: 'sandbox'
+      };
+      console.log('❌ Environment secret not found - defaulting to sandbox');
+    }
+    
+    // STEP 3: Full Config Test
+    console.log('\n⚙️ STEP 3: FULL CONFIG SIMULATION');
+    console.log('=================================');
+    
+    try {
+      const { getPayFastConfig } = await import('backend/payfast-config-fixed.jsw');
+      const config = await getPayFastConfig();
+      const summary = config.getConfigSummary();
+      
+      diagnostic.step3_config = {
+        success: true,
+        summary: summary,
+        environment: summary.environment,
+        baseUrl: summary.baseUrl,
+        merchantId: summary.merchantId,
+        isLive: summary.environment === 'live',
+        hasLiveCredentials: summary.merchantId !== 10000100
+      };
+      
+      console.log(`Config Environment: ${summary.environment}`);
+      console.log(`Config Base URL: ${summary.baseUrl}`);
+      console.log(`Config Merchant ID: ${summary.merchantId}`);
+      
+    } catch (error) {
+      diagnostic.step3_config = {
+        success: false,
+        error: error.message
+      };
+      console.log(`❌ Config test failed: ${error.message}`);
+    }
+    
+    // STEP 4: Analysis and Recommendations
+    console.log('\n📊 STEP 4: ANALYSIS AND RECOMMENDATIONS');
+    console.log('=======================================');
+    
+    const analysis = {
+      environmentSecretStatus: 'unknown',
+      credentialsStatus: 'unknown',
+      configStatus: 'unknown',
+      overallStatus: 'unknown'
+    };
+    
+    // Analyze environment secret
+    if (diagnostic.step1_secrets.payfastEnvironment?.found) {
+      const envSecret = diagnostic.step1_secrets.payfastEnvironment;
+      if (envSecret.isLiveTrimmed) {
+        analysis.environmentSecretStatus = 'correct';
+      } else {
+        analysis.environmentSecretStatus = 'incorrect_value';
+        diagnostic.recommendations.push(`UPDATE payfastEnvironment secret to exactly "live" (currently: "${envSecret.rawValue}")`);
+      }
+    } else {
+      analysis.environmentSecretStatus = 'missing';
+      diagnostic.recommendations.push('ADD payfastEnvironment secret with value "live"');
+    }
+    
+    // Analyze credentials
+    const merchantIdSecret = diagnostic.step1_secrets.payfast_merchant_id;
+    const merchantKeySecret = diagnostic.step1_secrets.payfast_merchant_key;
+    
+    if (merchantIdSecret?.found && merchantKeySecret?.found) {
+      if (merchantIdSecret.isSandboxId || merchantKeySecret.isSandboxKey) {
+        analysis.credentialsStatus = 'sandbox';
+        if (merchantIdSecret.isSandboxId) {
+          diagnostic.recommendations.push('UPDATE payfast_merchant_id to your live merchant ID (currently sandbox: 10000100)');
+        }
+        if (merchantKeySecret.isSandboxKey) {
+          diagnostic.recommendations.push('UPDATE payfast_merchant_key to your live merchant key (currently sandbox)');
+        }
+      } else {
+        analysis.credentialsStatus = 'live';
+      }
+    } else {
+      analysis.credentialsStatus = 'missing';
+      if (!merchantIdSecret?.found) {
+        diagnostic.recommendations.push('ADD payfast_merchant_id secret');
+      }
+      if (!merchantKeySecret?.found) {
+        diagnostic.recommendations.push('ADD payfast_merchant_key secret');
+      }
+    }
+    
+    // Analyze config
+    if (diagnostic.step3_config.success) {
+      if (diagnostic.step3_config.isLive && diagnostic.step3_config.hasLiveCredentials) {
+        analysis.configStatus = 'live_correct';
+        analysis.overallStatus = 'success';
+      } else if (diagnostic.step3_config.isLive && !diagnostic.step3_config.hasLiveCredentials) {
+        analysis.configStatus = 'live_but_sandbox_credentials';
+        analysis.overallStatus = 'partial';
+      } else {
+        analysis.configStatus = 'sandbox';
+        analysis.overallStatus = 'needs_fix';
+      }
+    } else {
+      analysis.configStatus = 'failed';
+      analysis.overallStatus = 'error';
+    }
+    
+    diagnostic.step4_analysis = analysis;
+    
+    console.log('Analysis Results:');
+    console.log(`Environment Secret: ${analysis.environmentSecretStatus}`);
+    console.log(`Credentials: ${analysis.credentialsStatus}`);
+    console.log(`Config: ${analysis.configStatus}`);
+    console.log(`Overall Status: ${analysis.overallStatus}`);
+    
+    if (diagnostic.recommendations.length > 0) {
+      console.log('\nRecommendations:');
+      diagnostic.recommendations.forEach((rec, index) => {
+        console.log(`${index + 1}. ${rec}`);
+      });
+    }
+    
+    return diagnostic;
+    
+  } catch (error) {
+    console.error('Ultimate diagnostic failed:', error);
+    return {
+      success: false,
+      error: error.message,
+      timestamp: new Date().toISOString()
+    };
+  }
+}

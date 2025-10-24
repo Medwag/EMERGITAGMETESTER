@@ -1,0 +1,74 @@
+import { getPaystackSecretKey, PAYSTACK_CONFIG } from './paystack-config.jsw';
+import { fetch } from 'wix-fetch';
+import wixUsersBackend from 'wix-users-backend';
+import wixData from 'wix-data';
+import { getPlanByName } from './plan-utils.jsw';
+
+/**
+ * Create a Paystack subscription link
+ */
+export async function createPaystackSubscriptionLink(planTier, billingCycle) {
+    const plan = await getPlanByName(planTier);
+    if (!plan) throw new Error(`Plan not found for ${planTier}`);
+
+    const isAnnual = billingCycle.trim().toLowerCase() === 'annual';
+    const amount = isAnnual ? plan.amountAnnual : plan.amountMonthly;
+    const planCode = isAnnual ? plan.paystackPlanCodeAnnual : plan.paystackPlanCode;
+    
+    if (!planCode) {
+        throw new Error(`Plan code not configured for ${planTier} (${billingCycle})`);
+    }
+
+    const secretKey = await getPaystackSecretKey();
+    const user = await wixUsersBackend.currentUser;
+    const email = await user.getEmail();
+    const userId = user.id;
+
+    if (!email) throw new Error("Current user has no email");
+
+    const body = {
+        email: email,
+        plan: planCode,
+        amount: amount,
+        currency: PAYSTACK_CONFIG.CURRENCY,
+        metadata: { userId, planTier, billingCycle },
+        callback_url: "https://www.emergitag.me/subscription-confirmation"
+    };
+
+    const response = await fetch(`${PAYSTACK_CONFIG.API_BASE_URL}/transaction/initialize`, {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${secretKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+    });
+
+    const result = await response.json();
+    if (!result.status) throw new Error(result.message);
+
+    return result.data.authorization_url;
+}
+
+/**
+ * Verify subscription transaction
+ */
+export async function verifySubscription(reference) {
+    const secretKey = await getPaystackSecretKey();
+
+    const response = await fetch(`${PAYSTACK_CONFIG.API_BASE_URL}/transaction/verify/${reference}`, {
+        method: "GET",
+        headers: { "Authorization": `Bearer ${secretKey}` }
+    });
+
+    const result = await response.json();
+    if (!result.status) throw new Error(result.message);
+
+    const { email, metadata, status } = result.data;
+    if (status !== "success") throw new Error("Subscription not successful");
+
+    await wixData.update("Emergency_Profiles", {
+        _id: metadata.userId,
+        membershipTier: metadata.planTier,
+        email
+    });
+
+    return { success: true, tier: metadata.planTier };
+}

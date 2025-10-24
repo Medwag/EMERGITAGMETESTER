@@ -1,0 +1,83 @@
+// backend/paystackVerify.jsw
+
+import { fetch } from 'wix-fetch';
+import wixSecretsBackend from 'wix-secrets-backend';
+import wixData from 'wix-data';
+import { sendWhatsAppAlert, sendEmailAlert } from 'backend/notify.jsw'; 
+import { saveProfile } from 'backend/profile-service.jsw';
+
+/**
+ * Verify Paystack payment, update CMS, and send alerts (WhatsApp, Email, Discord to Admin only)
+ */
+export async function verifyPaystackPayment(reference, userId, membershipTier) {
+    try {
+        const { getPaystackSecretKey, PAYSTACK_CONFIG } = await import('./paystack-config.jsw');
+        const secretKey = await getPaystackSecretKey();
+        const discordWebhook = await wixSecretsBackend.getSecret("discordWebhook"); // 🔑 store your Discord webhook URL here
+
+        const url = `${PAYSTACK_CONFIG.API_BASE_URL}/transaction/verify/${reference}`;
+
+        const response = await fetch(url, {
+            method: "GET",
+            headers: {
+                "Authorization": `Bearer ${secretKey}`,
+                "Content-Type": "application/json"
+            }
+        });
+
+        if (!response.ok) throw new Error(`Paystack verify failed: ${response.status}`);
+        const result = await response.json();
+
+        if (result.data.status === "success") {
+            // ✅ Add or update Emergency Profile in CMS
+            const profile = {
+                userId,
+                membershipTier,
+                createdAt: new Date(),
+                publicViewId: generatePublicId()
+            };
+
+            let existing = await wixData.query("Emergency_Profiles")
+                .eq("userId", userId)
+                .find();
+
+            if (existing.items.length > 0) {
+                await wixData.update("Emergency_Profiles", { ...existing.items[0], ...profile });
+            } else {
+                await saveProfile(profile, "signup flow");
+            }
+
+            // ✅ Notify via WhatsApp
+            await sendWhatsAppAlert(`✅ Paystack payment verified for ${userId}, Tier: ${membershipTier}`);
+
+            // ✅ Notify via Email
+            await sendEmailAlert("Payment Verified", `Paystack payment verified for ${userId}, Tier: ${membershipTier}`);
+
+            // ✅ Notify via Discord (only admin)
+            await fetch(discordWebhook, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    content: `🚨 Paystack payment verified!\n**User:** ${userId}\n**Tier:** ${membershipTier}\n**Ref:** ${reference}`
+                })
+            });
+
+            return { success: true, profile };
+        } else {
+            return { success: false, error: "Payment not successful" };
+        }
+    } catch (err) {
+        console.error("verifyPaystackPayment error:", err);
+
+        // 🔔 Fail alerts
+        await sendWhatsAppAlert(`❌ Paystack verify error: ${err.message}`);
+        await sendEmailAlert("Payment Verification Error", err.message);
+
+        return { success: false, error: err.message };
+    }
+}
+
+// Simple generator for publicViewId
+function generatePublicId() {
+    return Math.random().toString(36).substring(2, 10);
+}

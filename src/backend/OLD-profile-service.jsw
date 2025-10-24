@@ -1,0 +1,87 @@
+console.log('[DEBUG] ⚠️ OLD profile-service.jsw loaded (should NOT happen!)');
+// backend/profile-service.jsw
+import wixData from "wix-data";
+import wixUsersBackend from "wix-users-backend";
+
+// 🟢 Save (insert or update)
+export async function saveProfile(profile, reason = "update") {
+  const user = wixUsersBackend.currentUser;
+  const isNew = !profile._id;
+
+  // Write to main collection
+  const saved = isNew
+    ? await wixData.insert("Emergency_Profiles", profile)
+    : await wixData.update("Emergency_Profiles", profile);
+
+  // Check for recent backups to prevent spamming (within last 5 minutes)
+  let shouldBackup = true;
+  if (!isNew) { // Only check for existing profiles
+    try {
+      const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
+      const recentBackups = await wixData.query("Emergency_Profiles_Backup")
+        .eq("originalProfileId", saved._id)
+        .gt("backupTimestamp", fiveMinutesAgo)
+        .limit(1)
+        .find({ suppressAuth: true });
+      
+      if (recentBackups.items.length > 0) {
+        shouldBackup = false;
+        console.log(`⏳ Skipping backup for profile ${saved._id} - recent backup exists`);
+      }
+    } catch (checkErr) {
+      console.warn('Could not check for recent backups, proceeding:', checkErr.message);
+    }
+  }
+
+  // Mirror to backup (remove _id to prevent conflicts)
+  if (shouldBackup) {
+    const { _id, ...profileDataWithoutId } = saved;
+    const backupEntry = {
+      ...profileDataWithoutId,
+      originalProfileId: saved._id,
+      backupTimestamp: new Date(),
+      backupReason: reason || (isNew ? "profile_created" : "profile_updated")
+    };
+    
+    try {
+      await wixData.insert("Emergency_Profiles_Backup", backupEntry);
+      console.log(`✅ Profile backup saved for ${saved._id}`);
+    } catch (backupErr) {
+      console.error("❌ Profile backup failed:", backupErr);
+      // Don't fail the main operation if backup fails
+    }
+  }
+
+  // Log to audit
+  await wixData.insert("Emergency_Profiles_Audit", {
+    _profileId: saved._id,
+    action: isNew ? "insert" : "update",
+    performedBy: user.id,
+    timestamp: new Date(),
+    data: JSON.stringify(saved),
+    reason
+  });
+
+  return saved;
+}
+
+// 🟢 Delete (safe delete with audit logging)
+export async function deleteProfile(profileId, reason = "user request") {
+  const user = wixUsersBackend.currentUser;
+  const profile = await wixData.get("Emergency_Profiles", profileId);
+
+  if (!profile) return;
+
+  // Log before deleting
+  await wixData.insert("Emergency_Profiles_Audit", {
+    _profileId: profile._id,
+    action: "delete",
+    performedBy: user.id,
+    timestamp: new Date(),
+    data: JSON.stringify(profile),
+    reason
+  });
+
+  // Remove from main collection only
+  await wixData.remove("Emergency_Profiles", profileId);
+}

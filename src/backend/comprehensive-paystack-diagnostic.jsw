@@ -1,0 +1,465 @@
+// backend/comprehensive-paystack-diagnostic.jsw
+// Comprehensive Paystack diagnostic tool to extract all available data
+
+import { getPaystackSecretKey, PAYSTACK_CONFIG } from './paystack-config.jsw';
+import { fetch } from 'wix-fetch';
+import wixData from 'wix-data';
+
+/**
+ * Comprehensive Paystack diagnostic for a given email
+ * This will extract ALL available data from Paystack to identify missing subscription info
+ */
+export async function comprehensivePaystackDiagnostic(email) {
+    console.log(`🔍 COMPREHENSIVE DIAGNOSTIC: Starting for email: ${email}`);
+    
+    const diagnostic = {
+        timestamp: new Date().toISOString(),
+        email: email,
+        paystack_data: {},
+        cms_data: {},
+        analysis: {},
+        recommendations: []
+    };
+    
+    try {
+        const secretKey = await getPaystackSecretKey();
+        if (!secretKey) {
+            throw new Error("Paystack secret key not configured");
+        }
+        
+        console.log(`🔑 Using secret key: ${secretKey.substring(0, 15)}...`);
+        diagnostic.secret_key_info = {
+            configured: true,
+            prefix: secretKey.substring(0, 15),
+            is_live: secretKey.includes('live'),
+            is_test: secretKey.includes('test')
+        };
+        
+        // ===========================================
+        // 1. CUSTOMER DATA EXTRACTION
+        // ===========================================
+        console.log(`👤 STEP 1: Extracting customer data...`);
+        diagnostic.paystack_data.customers = await extractCustomerData(email, secretKey);
+        
+        // ===========================================
+        // 2. TRANSACTION DATA EXTRACTION  
+        // ===========================================
+        console.log(`💰 STEP 2: Extracting transaction data...`);
+        diagnostic.paystack_data.transactions = await extractTransactionData(email, secretKey);
+        
+        // ===========================================
+        // 3. SUBSCRIPTION DATA EXTRACTION
+        // ===========================================
+        console.log(`📋 STEP 3: Extracting subscription data...`);
+        diagnostic.paystack_data.subscriptions = await extractSubscriptionData(email, secretKey);
+        
+        // ===========================================
+        // 4. PLAN DATA EXTRACTION
+        // ===========================================
+        console.log(`📊 STEP 4: Extracting plan data...`);
+        diagnostic.paystack_data.plans = await extractPlanData(secretKey);
+        
+        // ===========================================
+        // 5. CMS DATA EXTRACTION
+        // ===========================================
+        console.log(`🗄️ STEP 5: Extracting CMS data...`);
+        diagnostic.cms_data = await extractCMSData(email);
+        
+        // ===========================================
+        // 6. DATA ANALYSIS & RECOMMENDATIONS
+        // ===========================================
+        console.log(`🧠 STEP 6: Analyzing data and generating recommendations...`);
+        diagnostic.analysis = analyzeData(diagnostic);
+        diagnostic.recommendations = generateRecommendations(diagnostic);
+        
+        console.log(`✅ DIAGNOSTIC COMPLETE for ${email}`);
+        return { success: true, diagnostic };
+        
+    } catch (error) {
+        console.error(`❌ DIAGNOSTIC FAILED for ${email}:`, error);
+        diagnostic.error = error.message;
+        return { success: false, diagnostic, error: error.message };
+    }
+}
+
+// ===========================================
+// CUSTOMER DATA EXTRACTION
+// ===========================================
+async function extractCustomerData(email, secretKey) {
+    const customerData = { found: [], search_methods: [] };
+    
+    try {
+        // Method 1: Search by email parameter
+        console.log(`🔍 Searching customers by email parameter...`);
+        const emailSearchUrl = `${PAYSTACK_CONFIG.API_BASE_URL}/customer?email=${encodeURIComponent(email)}`;
+        const emailResponse = await fetch(emailSearchUrl, {
+            headers: { Authorization: `Bearer ${secretKey}` }
+        });
+        const emailResult = await emailResponse.json();
+        
+        customerData.search_methods.push({
+            method: 'email_parameter',
+            url: emailSearchUrl,
+            success: emailResponse.ok,
+            status: emailResponse.status,
+            data_count: emailResult.data?.length || 0,
+            raw_response: emailResult
+        });
+        
+        if (emailResult.status && emailResult.data?.length > 0) {
+            customerData.found.push(...emailResult.data.map(c => ({...c, found_by: 'email_parameter'})));
+        }
+        
+        // Method 2: List all customers and filter (for comprehensive search)
+        console.log(`🔍 Searching in customer list...`);
+        const listUrl = `${PAYSTACK_CONFIG.API_BASE_URL}/customer?perPage=100`;
+        const listResponse = await fetch(listUrl, {
+            headers: { Authorization: `Bearer ${secretKey}` }
+        });
+        const listResult = await listResponse.json();
+        
+        customerData.search_methods.push({
+            method: 'customer_list',
+            url: listUrl,
+            success: listResponse.ok,
+            status: listResponse.status,
+            total_customers: listResult.data?.length || 0,
+            raw_response: listResult
+        });
+        
+        if (listResult.status && listResult.data?.length > 0) {
+            const matchingCustomers = listResult.data.filter(c => 
+                c.email?.toLowerCase() === email.toLowerCase()
+            );
+            customerData.found.push(...matchingCustomers.map(c => ({...c, found_by: 'customer_list'})));
+        }
+        
+    } catch (error) {
+        console.error(`❌ Customer extraction error:`, error);
+        customerData.error = error.message;
+    }
+    
+    // Remove duplicates based on customer_code
+    const uniqueCustomers = customerData.found.reduce((acc, customer) => {
+        if (!acc.find(c => c.customer_code === customer.customer_code)) {
+            acc.push(customer);
+        }
+        return acc;
+    }, []);
+    
+    customerData.found = uniqueCustomers;
+    customerData.total_found = uniqueCustomers.length;
+    
+    console.log(`👤 Customer extraction complete: ${customerData.total_found} customers found`);
+    return customerData;
+}
+
+// ===========================================
+// TRANSACTION DATA EXTRACTION
+// ===========================================
+async function extractTransactionData(email, secretKey) {
+    const transactionData = { found: [], search_methods: [] };
+    
+    try {
+        // Method 1: Search by email parameter
+        console.log(`💰 Searching transactions by email...`);
+        const emailSearchUrl = `${PAYSTACK_CONFIG.API_BASE_URL}/transaction?email=${encodeURIComponent(email)}&perPage=50`;
+        const emailResponse = await fetch(emailSearchUrl, {
+            headers: { Authorization: `Bearer ${secretKey}` }
+        });
+        const emailResult = await emailResponse.json();
+        
+        transactionData.search_methods.push({
+            method: 'email_parameter',
+            url: emailSearchUrl,
+            success: emailResponse.ok,
+            status: emailResponse.status,
+            data_count: emailResult.data?.length || 0
+        });
+        
+        if (emailResult.status && emailResult.data?.length > 0) {
+            transactionData.found.push(...emailResult.data.map(t => ({...t, found_by: 'email_parameter'})));
+        }
+        
+        // Method 2: Get recent transactions and filter
+        console.log(`💰 Searching in recent transactions...`);
+        const recentUrl = `${PAYSTACK_CONFIG.API_BASE_URL}/transaction?perPage=100`;
+        const recentResponse = await fetch(recentUrl, {
+            headers: { Authorization: `Bearer ${secretKey}` }
+        });
+        const recentResult = await recentResponse.json();
+        
+        transactionData.search_methods.push({
+            method: 'recent_transactions',
+            url: recentUrl,
+            success: recentResponse.ok,
+            status: recentResponse.status,
+            total_transactions: recentResult.data?.length || 0
+        });
+        
+        if (recentResult.status && recentResult.data?.length > 0) {
+            const matchingTransactions = recentResult.data.filter(t => 
+                t.customer?.email?.toLowerCase() === email.toLowerCase()
+            );
+            transactionData.found.push(...matchingTransactions.map(t => ({...t, found_by: 'recent_transactions'})));
+        }
+        
+    } catch (error) {
+        console.error(`❌ Transaction extraction error:`, error);
+        transactionData.error = error.message;
+    }
+    
+    // Remove duplicates and sort by date
+    const uniqueTransactions = transactionData.found.reduce((acc, transaction) => {
+        if (!acc.find(t => t.reference === transaction.reference)) {
+            acc.push(transaction);
+        }
+        return acc;
+    }, []);
+    
+    transactionData.found = uniqueTransactions.sort((a, b) => 
+        new Date(b.created_at) - new Date(a.created_at)
+    );
+    transactionData.total_found = uniqueTransactions.length;
+    transactionData.successful_transactions = uniqueTransactions.filter(t => t.status === 'success').length;
+    
+    console.log(`💰 Transaction extraction complete: ${transactionData.total_found} transactions found`);
+    return transactionData;
+}
+
+// ===========================================
+// SUBSCRIPTION DATA EXTRACTION
+// ===========================================
+async function extractSubscriptionData(email, secretKey) {
+    const subscriptionData = { found: [], search_methods: [], customer_subscriptions: [] };
+    
+    try {
+        // Method 1: List all subscriptions
+        console.log(`📋 Searching all subscriptions...`);
+        const allSubsUrl = `${PAYSTACK_CONFIG.API_BASE_URL}/subscription?perPage=100`;
+        const allSubsResponse = await fetch(allSubsUrl, {
+            headers: { Authorization: `Bearer ${secretKey}` }
+        });
+        const allSubsResult = await allSubsResponse.json();
+        
+        subscriptionData.search_methods.push({
+            method: 'all_subscriptions',
+            url: allSubsUrl,
+            success: allSubsResponse.ok,
+            status: allSubsResponse.status,
+            total_subscriptions: allSubsResult.data?.length || 0
+        });
+        
+        if (allSubsResult.status && allSubsResult.data?.length > 0) {
+            const matchingSubscriptions = allSubsResult.data.filter(s => 
+                s.customer?.email?.toLowerCase() === email.toLowerCase()
+            );
+            subscriptionData.found.push(...matchingSubscriptions.map(s => ({...s, found_by: 'all_subscriptions'})));
+        }
+        
+        // Method 2: Search subscriptions by customer codes (if we found customers)
+        console.log(`📋 Searching subscriptions by customer codes...`);
+        // This would require customer data to be available first
+        
+    } catch (error) {
+        console.error(`❌ Subscription extraction error:`, error);
+        subscriptionData.error = error.message;
+    }
+    
+    subscriptionData.total_found = subscriptionData.found.length;
+    subscriptionData.active_subscriptions = subscriptionData.found.filter(s => s.status === 'active').length;
+    
+    console.log(`📋 Subscription extraction complete: ${subscriptionData.total_found} subscriptions found`);
+    return subscriptionData;
+}
+
+// ===========================================
+// PLAN DATA EXTRACTION
+// ===========================================
+async function extractPlanData(secretKey) {
+    const planData = { found: [], search_methods: [] };
+    
+    try {
+        console.log(`📊 Extracting all plans...`);
+        const plansUrl = `${PAYSTACK_CONFIG.API_BASE_URL}/plan?perPage=50`;
+        const plansResponse = await fetch(plansUrl, {
+            headers: { Authorization: `Bearer ${secretKey}` }
+        });
+        const plansResult = await plansResponse.json();
+        
+        planData.search_methods.push({
+            method: 'all_plans',
+            url: plansUrl,
+            success: plansResponse.ok,
+            status: plansResponse.status,
+            total_plans: plansResult.data?.length || 0
+        });
+        
+        if (plansResult.status && plansResult.data?.length > 0) {
+            planData.found = plansResult.data;
+        }
+        
+    } catch (error) {
+        console.error(`❌ Plan extraction error:`, error);
+        planData.error = error.message;
+    }
+    
+    planData.total_found = planData.found.length;
+    
+    console.log(`📊 Plan extraction complete: ${planData.total_found} plans found`);
+    return planData;
+}
+
+// ===========================================
+// CMS DATA EXTRACTION
+// ===========================================
+async function extractCMSData(email) {
+    const cmsData = {};
+    
+    try {
+        // Emergency Profiles
+        console.log(`🗄️ Searching Emergency_Profiles...`);
+        const profilesQuery = await wixData.query("Emergency_Profiles")
+            .contains("emailAddress", email)
+            .find({ suppressAuth: true });
+        
+        cmsData.emergency_profiles = {
+            found: profilesQuery.items,
+            total_found: profilesQuery.items.length
+        };
+        
+        // Paystack Transactions (if you have this collection)
+        try {
+            console.log(`🗄️ Searching PaystackTransactions...`);
+            const transactionsQuery = await wixData.query("PaystackTransactions")
+                .contains("email", email)
+                .find({ suppressAuth: true });
+            
+            cmsData.paystack_transactions = {
+                found: transactionsQuery.items,
+                total_found: transactionsQuery.items.length
+            };
+        } catch (e) {
+            cmsData.paystack_transactions = { error: "Collection may not exist" };
+        }
+        
+        // Any other relevant collections
+        
+    } catch (error) {
+        console.error(`❌ CMS extraction error:`, error);
+        cmsData.error = error.message;
+    }
+    
+    console.log(`🗄️ CMS extraction complete`);
+    return cmsData;
+}
+
+// ===========================================
+// DATA ANALYSIS
+// ===========================================
+function analyzeData(diagnostic) {
+    const analysis = {
+        data_completeness: {},
+        data_consistency: {},
+        potential_issues: [],
+        summary: {}
+    };
+    
+    const { paystack_data, cms_data } = diagnostic;
+    
+    // Analyze data completeness
+    analysis.data_completeness = {
+        customers_found: paystack_data.customers?.total_found || 0,
+        transactions_found: paystack_data.transactions?.total_found || 0,
+        subscriptions_found: paystack_data.subscriptions?.total_found || 0,
+        cms_profiles_found: cms_data.emergency_profiles?.total_found || 0
+    };
+    
+    // Identify potential issues
+    if (analysis.data_completeness.customers_found === 0) {
+        analysis.potential_issues.push("NO_PAYSTACK_CUSTOMER_FOUND");
+    }
+    
+    if (analysis.data_completeness.transactions_found === 0) {
+        analysis.potential_issues.push("NO_PAYSTACK_TRANSACTIONS_FOUND");
+    }
+    
+    if (analysis.data_completeness.subscriptions_found === 0) {
+        analysis.potential_issues.push("NO_PAYSTACK_SUBSCRIPTIONS_FOUND");
+    }
+    
+    if (analysis.data_completeness.cms_profiles_found === 0) {
+        analysis.potential_issues.push("NO_CMS_PROFILES_FOUND");
+    }
+    
+    // Check for active subscriptions
+    const activeSubscriptions = paystack_data.subscriptions?.found?.filter(s => s.status === 'active') || [];
+    if (activeSubscriptions.length === 0 && paystack_data.subscriptions?.total_found > 0) {
+        analysis.potential_issues.push("NO_ACTIVE_SUBSCRIPTIONS_FOUND");
+    }
+    
+    analysis.summary = {
+        total_issues_found: analysis.potential_issues.length,
+        has_paystack_data: analysis.data_completeness.customers_found > 0 || analysis.data_completeness.transactions_found > 0,
+        has_active_subscriptions: activeSubscriptions.length > 0,
+        data_sync_needed: analysis.data_completeness.customers_found > 0 && analysis.data_completeness.cms_profiles_found === 0
+    };
+    
+    return analysis;
+}
+
+// ===========================================
+// RECOMMENDATIONS GENERATION
+// ===========================================
+function generateRecommendations(diagnostic) {
+    const recommendations = [];
+    const { analysis, paystack_data } = diagnostic;
+    
+    if (analysis.potential_issues.includes("NO_PAYSTACK_CUSTOMER_FOUND")) {
+        recommendations.push({
+            priority: "HIGH",
+            issue: "No Paystack customer found",
+            recommendation: "Check if the email address is correct or if the customer was created with a different email",
+            action: "Verify email spelling and check Paystack dashboard manually"
+        });
+    }
+    
+    if (analysis.potential_issues.includes("NO_PAYSTACK_TRANSACTIONS_FOUND")) {
+        recommendations.push({
+            priority: "HIGH", 
+            issue: "No Paystack transactions found",
+            recommendation: "This email may not have made any payments through Paystack",
+            action: "Check payment history in Paystack dashboard and verify payment method used"
+        });
+    }
+    
+    if (analysis.potential_issues.includes("NO_PAYSTACK_SUBSCRIPTIONS_FOUND")) {
+        recommendations.push({
+            priority: "CRITICAL",
+            issue: "No Paystack subscriptions found",
+            recommendation: "Even though you can see subscriptions in Paystack dashboard, the API cannot find them",
+            action: "Check API permissions, verify subscription status, and ensure correct API endpoint usage"
+        });
+    }
+    
+    if (analysis.summary.data_sync_needed) {
+        recommendations.push({
+            priority: "MEDIUM",
+            issue: "Data synchronization needed",
+            recommendation: "Paystack data exists but CMS profiles are missing",
+            action: "Run profile creation/sync process to update local database"
+        });
+    }
+    
+    // Add specific recommendations based on found data
+    if (paystack_data.customers?.total_found > 0 && paystack_data.subscriptions?.total_found === 0) {
+        recommendations.push({
+            priority: "HIGH",
+            issue: "Customer exists but no subscriptions found via API",
+            recommendation: "The subscription may be linked differently or API permissions may be limited",
+            action: "Check customer details in Paystack dashboard and verify subscription linkage"
+        });
+    }
+    
+    return recommendations;
+}

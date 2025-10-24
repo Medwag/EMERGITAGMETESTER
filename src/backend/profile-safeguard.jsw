@@ -1,0 +1,79 @@
+import wixData from 'wix-data';
+import wixUsersBackend from 'wix-users-backend';
+
+/**
+ * Ensure a profile record has required fields: userId, emailAddress.
+ * Auto-fix or fill them if missing.
+ */
+export async function ensureValidProfile(userId) {
+  if (!userId) throw new Error('Missing userId for profile verification.');
+
+  try {
+    // Use normal find(), then suppress auth via permissions config in Wix
+    const query = wixData.query('Emergency_Profiles').eq('_owner', userId).limit(1);
+    const queryResult = await query.find(); // ✅ No type warnings
+
+    if (!queryResult.items.length) {
+      console.warn(`⚠️ No Emergency_Profiles found for userId ${userId}`);
+      return null;
+    }
+
+    let profile = queryResult.items[0];
+    let updated = false;
+
+    // Fetch member info
+    const member = await wixUsersBackend.getUser(userId);
+    const memberEmail = member?.loginEmail || null;
+
+    // Fix missing fields
+    if (!profile.emailAddress && memberEmail) {
+      profile.emailAddress = memberEmail;
+      updated = true;
+    }
+
+    if (!profile.userId) {
+      profile.userId = userId;
+      updated = true;
+    }
+
+    // Save updates
+    if (updated) {
+      profile.lastVerified = new Date();
+      await wixData.update('Emergency_Profiles', profile); // ✅ clean, safe
+      console.log(`✅ Fixed missing data for user ${userId}`);
+    } else {
+      console.log(`🟢 Profile valid for user ${userId}`);
+    }
+
+    return profile;
+  } catch (err) {
+    console.error('❌ ensureValidProfile error:', err);
+    return null;
+  }
+}
+
+/**
+ * Audit all profiles with missing data.
+ * Finds Emergency_Profiles missing critical fields and repairs them.
+ */
+export async function auditProfiles() {
+  try {
+    const missingProfiles = await wixData.query('Emergency_Profiles')
+      .or(
+        wixData.query('Emergency_Profiles').eq('emailAddress', null),
+        wixData.query('Emergency_Profiles').eq('userId', null)
+      )
+      .limit(1000)
+      .find(); // ✅ No warning
+
+    console.log(`🔍 Found ${missingProfiles.items.length} profiles needing repair.`);
+
+    for (const p of missingProfiles.items) {
+      await ensureValidProfile(p._owner);
+    }
+
+    console.log('✅ Audit complete.');
+  } catch (err) {
+    console.error('❌ Audit failed:', err);
+  }
+}

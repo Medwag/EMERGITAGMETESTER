@@ -1,0 +1,183 @@
+// backend/core/production-config.jsw
+// ✅ PRODUCTION CRITICAL: Security and performance configuration
+// Apply these settings for production launch
+
+import { getSecret } from 'wix-secrets-backend';
+
+/**
+ * ✅ PRODUCTION CRITICAL: Security and performance configuration
+ */
+export class ProductionConfig {
+    
+    /**
+     * Get production-ready configuration
+     * @returns {Promise<object>} Production config
+     */
+    static async getProductionConfig() {
+        return {
+            // Payment Security
+            paymentSecurity: {
+                webhookVerification: true,
+                signatureValidation: true,
+                rateLimiting: {
+                    enabled: true,
+                    maxAttempts: 5,
+                    windowMinutes: 15
+                }
+            },
+            
+            // Database Performance
+            database: {
+                caching: {
+                    profileCache: 300, // 5 minutes
+                    planCache: 3600,   // 1 hour
+                    paymentCache: 600  // 10 minutes
+                },
+                batchProcessing: {
+                    enabled: true,
+                    batchSize: 50
+                }
+            },
+            
+            // Error Handling
+            errorHandling: {
+                logLevel: 'production', // Less verbose logging
+                alertOnCriticalErrors: true,
+                fallbackMethods: true
+            },
+            
+            // User Experience
+            userExperience: {
+                timeouts: {
+                    paymentDetection: 30000, // 30 seconds
+                    profileLoad: 10000,      // 10 seconds
+                    subscriptionCheck: 15000 // 15 seconds
+                },
+                retryAttempts: 3
+            },
+            
+            // Emergency Access
+            emergencyAccess: {
+                rateLimiting: {
+                    enabled: true,
+                    maxViewsPerHour: 50
+                },
+                logging: {
+                    trackViews: true,
+                    notifyOnAccess: true
+                }
+            }
+        };
+    }
+    
+    /**
+     * Validate production environment
+     * @returns {Promise<object>} Environment validation
+     */
+    static async validateProductionEnvironment() {
+        const issues = [];
+        
+        try {
+            // Check secrets configuration
+            const paystackSecret = await getSecret('paystack_secret_key');
+            if (!paystackSecret) {
+                issues.push('Paystack secret key not configured in Wix Secrets');
+            }
+            
+            const payfastSecret = await getSecret('payfast_secret_key');
+            if (!payfastSecret) {
+                issues.push('PayFast secret key not configured in Wix Secrets');
+            }
+            
+            // Check required collections
+            const requiredCollections = [
+                'Emergency_Profiles',
+                'PlanOptions', 
+                'PaystackTransactions',
+                'MemberActivityLogs'
+            ];
+            
+            // Note: In production, you'd check collection existence
+            // This is a placeholder for the actual check
+            
+            return {
+                isValid: issues.length === 0,
+                issues: issues,
+                recommendations: this.getProductionRecommendations()
+            };
+            
+        } catch (error) {
+            return {
+                isValid: false,
+                issues: [`Environment validation error: ${error.message}`],
+                recommendations: ['Fix environment configuration before launch']
+            };
+        }
+    }
+    
+    /**
+     * Get production launch recommendations
+     * @returns {Array<string>} Recommendations
+     */
+    static getProductionRecommendations() {
+        return [
+            '✅ Run database cleanup before launch',
+            '✅ Test complete payment flow with real money (small amount)',
+            '✅ Verify emergency profile access works with QR codes',
+            '✅ Set up monitoring/alerts for payment failures',
+            '✅ Prepare customer support documentation',
+            '✅ Test subscription cancellation flow',
+            '✅ Verify email notifications work correctly',
+            '✅ Test mobile responsiveness on all devices',
+            '✅ Set up backup/recovery procedures',
+            '✅ Configure SSL certificates for custom domains'
+        ];
+    }
+    
+    /**
+     * Get launch checklist
+     * @returns {object} Launch checklist
+     */
+    static getLaunchChecklist() {
+        return {
+            technical: [
+                { item: 'Database cleanup completed', critical: true },
+                { item: 'Payment system tested end-to-end', critical: true },
+                { item: 'Emergency access validated', critical: true },
+                { item: 'User journey flows working', critical: true },
+                { item: 'Error handling implemented', critical: true },
+                { item: 'Performance optimized', critical: false },
+                { item: 'Security hardened', critical: true },
+                { item: 'Monitoring configured', critical: false }
+            ],
+            business: [
+                { item: 'R149.00 signup fee confirmed', critical: true },
+                { item: 'Subscription tiers configured', critical: true },
+                { item: 'Payment gateway accounts verified', critical: true },
+                { item: 'Terms of service updated', critical: true },
+                { item: 'Privacy policy updated', critical: true },
+                { item: 'Customer support ready', critical: false },
+                { item: 'Marketing materials prepared', critical: false }
+            ],
+            legal: [
+                { item: 'Data protection compliance', critical: true },
+                { item: 'Payment card industry compliance', critical: true },
+                { item: 'Emergency contact data handling', critical: true },
+                { item: 'User consent mechanisms', critical: true }
+            ]
+        };
+    }
+}
+
+// Export convenience functions
+export async function getProductionConfig() {
+    return ProductionConfig.getProductionConfig();
+}
+
+export async function validateEnvironment() {
+    return ProductionConfig.validateProductionEnvironment();
+}
+
+export function getLaunchChecklist() {
+    return ProductionConfig.getLaunchChecklist();
+}

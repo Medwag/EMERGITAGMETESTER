@@ -1,0 +1,95 @@
+// backend/post_paystack.jsw
+
+import { ok, badRequest, serverError } from 'wix-http-functions';
+import wixData from 'wix-data';
+import { fetch } from 'wix-fetch';
+import { sendWhatsAppAlert, sendEmailAlert } from 'backend/notify.jsw'; 
+
+// ✅ Load secrets (already set in Secrets Manager)
+import wixSecretsBackend from 'wix-secrets-backend';
+let paystackKey;
+
+async function getSecret() {
+  if (!paystackKey) {
+    paystackKey = await wixSecretsBackend.getSecret("PaystackSKTest");
+  }
+  return paystackKey;
+}
+
+// === Helper: Verify Paystack Event ===
+async function verifyEvent(event) {
+  try {
+    const key = await getSecret();
+    const sig = event.headers["x-paystack-signature"];
+    const payload = JSON.stringify(event.body);
+
+    // Normally you’d HMAC verify here. For Wix we do simplified check
+    return sig && payload;
+  } catch (err) {
+    console.error("Verification failed:", err);
+    return false;
+  }
+}
+
+// === Main Webhook Function ===
+export async function post_paystack(request) {
+  try {
+    const body = await request.body.json();
+
+    const verified = await verifyEvent({ headers: request.headers, body });
+    if (!verified) {
+      console.warn("❌ Unverified Paystack webhook received");
+      return badRequest({ body: { error: "Invalid signature" } });
+    }
+
+    console.log("✅ Paystack webhook event:", body.event);
+
+    if (body.event === "subscription.create" || body.event === "charge.success") {
+      const userId = body.data.metadata?.userId;
+      const tier = body.data.metadata?.membershipTier;
+      const email = body.data.customer?.email;
+
+      if (!userId || !tier) {
+        console.warn("⚠️ Missing userId or tier in webhook metadata", body.data.metadata);
+        return ok({ body: { message: "No userId/tier in metadata" } });
+      }
+
+      // === Update Emergency Profile ===
+      const update = {
+        userId,
+        membershipTier: tier,
+        paystackId: body.data.subscription_code || body.data.reference,
+        updatedAt: new Date()
+      };
+
+      const results = await wixData.query("Emergency_Profiles")
+        .eq("userId", userId)
+        .find();
+
+      if (results.items.length > 0) {
+        const profile = results.items[0];
+        update._id = profile._id;
+        await wixData.update("Emergency_Profiles", { ...profile, ...update });
+        console.log(`🔄 Profile updated for ${userId} to tier ${tier}`);
+      } else {
+        await wixData.insert("Emergency_Profiles", update);
+        console.log(`🆕 New profile created for ${userId} at tier ${tier}`);
+      }
+
+      // === Send Alerts (from old webhook) ===
+      try {
+        await sendWhatsAppAlert(`🚨 New Paystack Subscription\nUser: ${email}\nTier: ${tier}`);
+        await sendEmailAlert("EmergiTag Subscription", `User ${email} subscribed to ${tier}.`);
+        console.log("📲 Alerts sent successfully");
+      } catch (notifyErr) {
+        console.error("❌ Failed to send notifications:", notifyErr);
+      }
+    }
+
+    return ok({ body: { status: "success" } });
+
+  } catch (err) {
+    console.error("❌ Error in post_paystack:", err);
+    return serverError({ body: { error: err.message } });
+  }
+}

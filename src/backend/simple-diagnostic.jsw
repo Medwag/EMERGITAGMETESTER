@@ -1,0 +1,50 @@
+// Simple PayFast Diagnostic - Easy to call from any page
+
+import { getSecret } from 'wix-secrets-backend';
+
+export async function quickPayFastCheck() {
+  console.log('🔍 Quick PayFast Check');
+  
+  try {
+    // Check environment secret
+    let env = 'sandbox'; // default
+    try {
+      const envSecret = await getSecret('payfastEnvironment');
+      env = envSecret && envSecret.toLowerCase() === 'live' ? 'live' : 'sandbox';
+      console.log(`Environment secret: "${envSecret}" -> ${env}`);
+    } catch (e) {
+      console.log('No environment secret found - using sandbox');
+    }
+    
+    // Check merchant ID
+    let merchantId = 10000100; // default sandbox
+    try {
+      const id = await getSecret('payfast_merchant_id');
+      merchantId = parseInt(id, 10);
+      console.log(`Merchant ID: ${merchantId}`);
+    } catch (e) {
+      console.log('No merchant ID found - using sandbox default');
+    }
+    
+    // Determine URLs
+    const baseUrl = env === 'live' 
+      ? 'https://www.payfast.co.za/eng/process'
+      : 'https://sandbox.payfast.co.za/eng/process';
+    
+    const result = {
+      environment: env,
+      baseUrl: baseUrl,
+      merchantId: merchantId,
+      isLive: env === 'live',
+      hasLiveCredentials: merchantId !== 10000100,
+      status: env === 'live' && merchantId !== 10000100 ? 'LIVE' : 'SANDBOX'
+    };
+    
+    console.log('Quick Check Result:', result);
+    return result;
+    
+  } catch (error) {
+    console.error('Quick check failed:', error);
+    return { error: error.message };
+  }
+}

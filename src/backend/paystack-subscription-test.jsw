@@ -1,0 +1,197 @@
+// backend/paystack-subscription-test.jsw
+// Comprehensive testing for Paystack subscription retrieval
+import { getUserSubscriptionDetails } from './paystack.jsw';
+import { diagnoseSubscriptionSync } from './subscription-sync-diagnostics.jsw';
+import wixUsers from 'wix-users-backend';
+import wixData from 'wix-data';
+
+/**
+ * Test subscription retrieval for a specific user
+ * @param {string} userId - User ID to test
+ * @returns {Promise<object>} Test results
+ */
+export async function testUserSubscriptionRetrieval(userId) {
+    try {
+        console.log('🧪 Testing subscription retrieval for userId:', userId);
+        
+        const results = {
+            userId: userId,
+            timestamp: new Date(),
+            steps: [],
+            success: false,
+            subscriptionData: null,
+            errors: []
+        };
+
+        // Step 1: Check user exists
+        try {
+            const user = await wixUsers.getUser(userId);
+            results.steps.push('✅ User found in Wix Users');
+            results.userEmail = user.loginEmail;
+        } catch (userError) {
+            results.steps.push('❌ User not found in Wix Users');
+            results.errors.push(userError.message);
+        }
+
+        // Step 2: Check Emergency Profile exists
+        try {
+            const profileRes = await wixData.query('Emergency_Profiles')
+                .eq('_owner', userId)
+                .limit(1)
+                .find({ suppressAuth: true });
+
+            if (profileRes.items.length > 0) {
+                const profile = profileRes.items[0];
+                results.steps.push('✅ Emergency Profile found');
+                results.profile = {
+                    id: profile._id,
+                    email: profile.emailAddress || profile.email,
+                    subscriptionActive: profile.subscriptionActive,
+                    paystackSubscriptionCode: profile.paystackSubscriptionCode,
+                    subscriptionId: profile.subscriptionId,
+                    customer_code: profile.customer_code,
+                    membershipTier: profile.membershipTier
+                };
+            } else {
+                results.steps.push('❌ No Emergency Profile found');
+                results.errors.push('Emergency Profile not found for user');
+            }
+        } catch (profileError) {
+            results.steps.push('❌ Error querying Emergency Profile');
+            results.errors.push(profileError.message);
+        }
+
+        // Step 3: Test getUserSubscriptionDetails function
+        try {
+            console.log('🔍 Calling getUserSubscriptionDetails...');
+            const subscriptionResult = await getUserSubscriptionDetails(userId);
+            
+            if (subscriptionResult.error) {
+                results.steps.push(`⚠️ getUserSubscriptionDetails returned error: ${subscriptionResult.error}`);
+                results.subscriptionData = subscriptionResult;
+                
+                if (subscriptionResult.recoverable) {
+                    results.steps.push('ℹ️ Subscription is marked as recoverable');
+                }
+            } else {
+                results.steps.push('✅ getUserSubscriptionDetails returned data');
+                results.subscriptionData = subscriptionResult;
+                results.success = true;
+            }
+        } catch (subscriptionError) {
+            results.steps.push(`❌ getUserSubscriptionDetails threw error: ${subscriptionError.message}`);
+            results.errors.push(subscriptionError.message);
+        }
+
+        // Step 4: Run diagnostic if subscription retrieval failed
+        if (!results.success) {
+            try {
+                console.log('🔍 Running comprehensive diagnostic...');
+                const diagnostic = await diagnoseSubscriptionSync(userId);
+                results.steps.push('✅ Diagnostic completed');
+                results.diagnostic = diagnostic;
+                
+                if (diagnostic.issues?.length > 0) {
+                    results.steps.push(`📋 Found ${diagnostic.issues.length} issues`);
+                }
+                
+                if (diagnostic.recommendations?.length > 0) {
+                    results.steps.push(`💡 Got ${diagnostic.recommendations.length} recommendations`);
+                }
+            } catch (diagnosticError) {
+                results.steps.push(`❌ Diagnostic failed: ${diagnosticError.message}`);
+                results.errors.push(diagnosticError.message);
+            }
+        }
+
+        // Summary
+        results.summary = {
+            hasProfile: !!results.profile,
+            hasSubscriptionCode: !!(results.profile?.paystackSubscriptionCode || results.profile?.subscriptionId),
+            subscriptionRetrievalWorking: results.success,
+            needsRecovery: results.subscriptionData?.recoverable || false,
+            overallHealth: results.success ? 'HEALTHY' : 'NEEDS_ATTENTION'
+        };
+
+        console.log('🎯 Subscription test completed:', results.summary);
+        return results;
+
+    } catch (error) {
+        console.error('❌ Subscription test failed:', error);
+        return {
+            userId: userId,
+            error: error.message,
+            success: false,
+            summary: { overallHealth: 'ERROR' }
+        };
+    }
+}
+
+/**
+ * Test subscription retrieval for current logged-in user
+ * @returns {Promise<object>} Test results
+ */
+export async function testCurrentUserSubscription() {
+    try {
+        // This won't work in backend context, but shows the pattern
+        console.log('❌ testCurrentUserSubscription can only be called from frontend');
+        return { error: 'Must be called from frontend with current user context' };
+    } catch (error) {
+        return { error: error.message };
+    }
+}
+
+/**
+ * Batch test multiple users (for admin debugging)
+ * @param {string[]} userIds - Array of user IDs to test
+ * @returns {Promise<object>} Batch test results
+ */
+export async function batchTestSubscriptions(userIds = []) {
+    try {
+        console.log('🧪 Running batch subscription tests for', userIds.length, 'users');
+        
+        const batchResults = {
+            timestamp: new Date(),
+            totalUsers: userIds.length,
+            results: [],
+            summary: {
+                healthy: 0,
+                needsAttention: 0,
+                errors: 0
+            }
+        };
+
+        for (const userId of userIds) {
+            try {
+                const result = await testUserSubscriptionRetrieval(userId);
+                batchResults.results.push(result);
+                
+                switch (result.summary?.overallHealth) {
+                    case 'HEALTHY':
+                        batchResults.summary.healthy++;
+                        break;
+                    case 'NEEDS_ATTENTION':
+                        batchResults.summary.needsAttention++;
+                        break;
+                    default:
+                        batchResults.summary.errors++;
+                        break;
+                }
+            } catch (individualError) {
+                batchResults.results.push({
+                    userId: userId,
+                    error: individualError.message,
+                    summary: { overallHealth: 'ERROR' }
+                });
+                batchResults.summary.errors++;
+            }
+        }
+
+        console.log('🎯 Batch test completed:', batchResults.summary);
+        return batchResults;
+
+    } catch (error) {
+        console.error('❌ Batch test failed:', error);
+        return { error: error.message };
+    }
+}

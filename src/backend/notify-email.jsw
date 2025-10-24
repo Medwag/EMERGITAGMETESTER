@@ -1,0 +1,15 @@
+import { triggeredEmails } from 'wix-crm-backend';
+
+export async function sendEmailAlert(contactId, templateId, variables={}) {
+    try {
+        if(!contactId) throw new Error("Email contactId missing");
+        if(!templateId) throw new Error("Email templateId missing");
+
+        await triggeredEmails.emailContact(templateId, contactId, { variables });
+        console.log(`✅ Email sent: ${templateId} to ${contactId}`, variables);
+        return true;
+    } catch(err) {
+        console.error(`❌ Email FAILED (${templateId}) to ${contactId}:`, err.message);
+        throw err;
+    }
+}

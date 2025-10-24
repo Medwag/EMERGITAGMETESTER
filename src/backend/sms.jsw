@@ -1,0 +1,89 @@
+// backend/sms.jsw
+import { getSecret } from 'wix-secrets-backend';
+import { fetch } from 'wix-fetch';
+import { sendDiscordAlert } from 'backend/discord-utils.jsw'; // For internal alerts
+
+// Generic function to send an SMS
+// You will need to adapt the API call to your chosen SMS provider (e.g., Twilio, Nexmo, BulkSMS)
+export async function sendSMS(to, message) {
+    try {
+        if (!to || !message) {
+            console.warn("⚠️ Cannot send SMS: 'to' number or 'message' content is missing.");
+            return;
+        }
+
+        const smsApiKey = await getSecret("SMS_API_KEY");
+        const smsSenderId = await getSecret("SMS_SENDER_ID");
+
+        if (!smsApiKey || !smsSenderId) {
+            console.error("❌ SMS API keys or Sender ID not configured in Secrets Manager.");
+            await sendDiscordAlert("❌ SMS Gateway configuration error: Missing API Key or Sender ID.");
+            return;
+        }
+
+        // --- Example for a generic SMS Provider (Adjust this for your actual provider's API) ---
+        // This is a placeholder; you MUST replace this with your chosen provider's API
+        const smsProviderApiUrl = "https://api.example.com/sendsms"; // REPLACE WITH ACTUAL SMS PROVIDER URL
+        
+        const requestBody = {
+            to: to,
+            from: smsSenderId,
+            text: message,
+            // ... other parameters specific to your SMS provider (e.g., API key in body, not header)
+        };
+
+        const response = await fetch(smsProviderApiUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                // Some providers use Basic Auth or API Key in headers, others in the body
+                // 'Authorization': `Bearer ${smsApiKey}` // Example: if API key is a Bearer token
+            },
+            body: JSON.stringify(requestBody)
+        });
+
+        const result = await response.json();
+
+        if (response.ok && result.status === 'success') { // Adjust based on provider's success response
+            console.log(`✅ SMS sent successfully to ${to}. Response:`, result);
+            return result;
+        } else {
+            console.error(`❌ Failed to send SMS to ${to}. Response:`, result);
+            await sendDiscordAlert(`❌ SMS sending failed to ${to}: ${result.message || JSON.stringify(result)}`);
+            throw new Error(result.message || "SMS sending failed.");
+        }
+
+    } catch (err) {
+        console.error("❌ sendSMS function error:", err);
+        await sendDiscordAlert(`❌ Critical SMS function error: ${err.message}`);
+        throw err;
+    }
+}
+
+// You can create specific wrappers for templates if your SMS provider supports them,
+// or build the message string directly using interpolation.
+
+export async function sendSignUpSMS(profile) {
+    const message = `Welcome to EmergiTag, ${profile.fullName}! Your profile is ready.`; // Customize message
+    return sendSMS(profile.phone, message);
+}
+
+export async function sendPaymentReminderSMS(profile, planName, dueDate) {
+    const message = `Hi ${profile.fullName}, your EmergiTag ${planName} plan renews on ${dueDate}.`;
+    return sendSMS(profile.phone, message);
+}
+
+export async function sendPaymentSuccessSMS(profile, planName, expiryDate, dashboardLink) {
+    const message = `EmergiTag: Your payment for ${planName} was successful! Active until ${expiryDate}. Access: ${dashboardLink}`;
+    return sendSMS(profile.phone, message);
+}
+
+export async function sendEmergencyProfileLinkSMS(to, profileId, emergencyViewURL) {
+    const message = `EmergiTag Profile for ${profileId}: ${emergencyViewURL}`;
+    return sendSMS(to, message);
+}
+
+export async function sendEmergencyViewAlertSMS(to, clientName, viewerLocation, emergencyViewURL) {
+    const message = `EmergiTag Alert: ${clientName}'s profile viewed from ${viewerLocation}. View: ${emergencyViewURL}`;
+    return sendSMS(to, message);
+}

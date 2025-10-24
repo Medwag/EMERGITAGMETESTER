@@ -1,0 +1,102 @@
+// backend/syncPaystackEvents.jsw
+import wixData from 'wix-data';
+import { saveProfile } from 'backend/profile-service.jsw';
+
+
+
+/**
+ * Sync Paystack events to Emergency_Profiles.
+ * Creates new profiles if missing, updates existing ones,
+ * and logs the event for the dashboard.
+ * Can be called periodically or on-demand.
+ * @param {String} userEmail Optional: limit sync to a specific user
+ */
+export async function syncPaystackEvents(userEmail = null) {
+    try {
+        // 1️⃣ Query PaystackEvents, newest first
+        let query = wixData.query("PaystackEvents").descending("eventTimestamp");
+        if (userEmail) query = query.contains("eventPayload", userEmail);
+
+        const eventsResult = await query.find();
+        if (!eventsResult.items.length) return { synced: 0, message: "No events found" };
+
+        let syncedCount = 0;
+
+        for (let evt of eventsResult.items) {
+            const payload = JSON.parse(evt.eventPayload || "{}");
+            const eventType = evt.eventType;
+
+            // Only process relevant events
+            if (!["subscription.create", "subscription.success", "charge.success"].includes(eventType)) continue;
+
+            // Extract customer info
+            const customerEmail = payload?.data?.customer?.email || payload?.data?.email;
+            const customerCode = payload?.data?.customer?.customer_code || payload?.data?.customerCode;
+            const planTier = payload?.data?.plan?.name || payload?.data?.plan;
+            const subscriptionStatus = payload?.data?.status || null;
+
+            if (!customerEmail) continue; // skip events with no email
+
+            // 2️⃣ Check Emergency_Profiles
+            let profileQuery = await wixData.query("Emergency_Profiles")
+                .eq("emailAddress", customerEmail)
+                .limit(1)
+                .find();
+
+            const now = new Date();
+            let profile;
+
+            if (profileQuery.items.length) {
+                profile = profileQuery.items[0];
+            } else {
+                // Create missing profile
+                profile = {
+                    emailAddress: customerEmail,
+                    customerCode,
+                    membershipTier: planTier || null,
+                    planStatus: subscriptionStatus || null,
+                    signUpPaid: false,
+                    dateCreated: now,
+                    updatedAt: now,
+                    publicViewId: Math.random().toString(36).substring(2, 10)
+                };
+            }
+
+            // 3️⃣ Update profile info
+            profile.customerCode = customerCode || profile.customerCode;
+            profile.membershipTier = planTier || profile.membershipTier;
+            profile.planStatus = subscriptionStatus || profile.planStatus;
+            if (["charge.success", "subscription.success"].includes(eventType)) {
+                profile.signUpPaid = true;
+            }
+            profile.updatedAt = now;
+
+            // Save to CMS
+            if (profile._id) {
+                await saveProfile(profile, "signup flow");
+            } else {
+                const inserted = await saveProfile(profile, "signup flow");
+                profile._id = inserted._id; // ensure _id exists for logging
+            }
+
+            // 4️⃣ Log event for dashboard
+            const logEntry = {
+                userId: profile._id,
+                logType: "Paystack Event",
+                eventType,
+                logDate: now,
+                description: `Paystack event '${eventType}' for plan '${planTier}' processed.`,
+                eventPayload: JSON.stringify(payload)
+            };
+
+            await wixData.insert("PaystackEvents", logEntry);
+
+            syncedCount++;
+        }
+
+        return { synced: syncedCount, message: "Sync completed successfully" };
+    } catch (err) {
+        console.error("❌ syncPaystackEvents error:", err);
+        throw err;
+    }
+}

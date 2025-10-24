@@ -1,0 +1,199 @@
+// backend/payfastActions.jsw
+
+import wixData from 'wix-data';
+import { fetch } from 'wix-fetch'; // Import wix-fetch for making HTTP requests
+
+// PayFast API configuration will be managed by payfast-config.jsw
+// Base URLs will be dynamically determined based on environment
+
+const SUBSCRIBERS_COLLECTION = 'payfastSubscribers';
+const EMERGENCY_PROFILES_COLLECTION = 'Emergency_Profiles'; // Your existing collection
+
+/**
+ * Cancels a PayFast subscription via the PayFast API and updates local database.
+ *
+ * @param {string} payfastSubscriptionId - The PayFast token/subscription ID to cancel.
+ * @returns {Promise<Object>} An object indicating success, a message, and optionally memberName.
+ */
+export async function cancelPayfastSubscription(payfastSubscriptionId) {
+    console.log(`Backend: Attempting to cancel PayFast subscription: ${payfastSubscriptionId}`);
+
+    if (!payfastSubscriptionId) {
+        return { success: false, message: "PayFast Subscription ID is missing." };
+    }
+
+    try {
+        // Get PayFast credentials from centralized config
+        const { getPayFastConfig } = await import('./payfast-config.jsw');
+        const config = await getPayFastConfig();
+        const { merchantId, merchantKey } = config.getCredentials();
+        // Passphrase might not be directly used for basic auth, but is for ITN signature.
+        // If PayFast's API requires a signature for this call, we'd need to generate it.
+        // For direct API calls like this, Basic Auth with Merchant ID/Key is common.
+
+        if (!merchantId || !merchantKey) {
+            throw new Error("PayFast Merchant ID or Merchant Key not found in configuration.");
+        }
+
+        // Encode Merchant ID and Key for Basic Authentication
+        const authString = btoa(`${merchantId}:${merchantKey}`);
+
+        // Construct the cancellation URL
+        // Use live API URL - PayFast doesn't have sandbox API for subscriptions
+        const cancelUrl = `https://api.payfast.co.za/subscriptions/${payfastSubscriptionId}/cancel`;
+
+        console.log(`Backend: Sending PUT request to PayFast API: ${cancelUrl}`);
+
+        // --- STEP 1: Call PayFast API to cancel the subscription ---
+        const response = await fetch(cancelUrl, {
+            method: 'PUT', // As per documentation: PUT /subscriptions/:token/cancel
+            headers: {
+                'Authorization': `Basic ${authString}`,
+                'Content-Type': 'application/json' // Or 'application/x-www-form-urlencoded' if they expect form data
+            },
+            // PayFast's cancel endpoint typically doesn't require a body,
+            // but if it does, add it here (e.g., body: JSON.stringify({ reason: "Admin cancellation" }))
+        });
+
+        let payfastResult;
+        if (response.headers.get('content-type')?.includes('application/json')) {
+            payfastResult = await response.json();
+        } else {
+            payfastResult = await response.text(); // Get raw text if not JSON
+        }
+        console.log("Backend: PayFast API cancellation raw response:", payfastResult);
+
+
+        if (!response.ok) {
+            // PayFast API returns 4xx or 5xx for errors
+            console.error(`Backend: PayFast API cancellation failed: ${response.status} - ${JSON.stringify(payfastResult)}`);
+            // Attempt to extract a more user-friendly message from PayFast's response
+            let errorMessage = "Unknown error from PayFast API.";
+            if (typeof payfastResult === 'object' && payfastResult.message) {
+                errorMessage = payfastResult.message;
+            } else if (typeof payfastResult === 'string' && payfastResult.length > 0) {
+                errorMessage = payfastResult; // Use raw text as error message
+            }
+            throw new Error(`PayFast API cancellation failed: ${errorMessage}`);
+        }
+
+        console.log("Backend: PayFast API cancellation successful. Response:", payfastResult);
+
+        // --- STEP 2: Update your local database (payfastSubscribers) ---
+        let subscriberRecord;
+        let memberName = "Unknown Member"; // Default for logging/return
+
+        // Find the subscriber in your database using the PayFast subscription ID
+        subscriberRecord = await wixData.query(SUBSCRIBERS_COLLECTION)
+            .eq('payfastSubscriptionId', payfastSubscriptionId)
+            .limit(1)
+            .find()
+            .then(results => results.items[0]);
+
+        if (subscriberRecord) {
+            memberName = subscriberRecord.name || subscriberRecord.email || memberName; // Get member name for success message
+            subscriberRecord.status = 'CANCELLED'; // Update status to CANCELLED
+            subscriberRecord.nextPaymentDate = null; // No future payments
+            subscriberRecord.lastUpdated = new Date(); // Add a lastUpdated timestamp
+            await wixData.update(SUBSCRIBERS_COLLECTION, subscriberRecord);
+            console.log(`Backend: Subscriber ${payfastSubscriptionId} status updated to CANCELLED in ${SUBSCRIBERS_COLLECTION}.`);
+
+            // --- STEP 3: Update Emergency_Profiles (if linked) ---
+            if (subscriberRecord.userId) { // Assuming userId links to _owner in Emergency_Profiles
+                const emergencyProfileResult = await wixData.query(EMERGENCY_PROFILES_COLLECTION)
+                    .eq("_owner", subscriberRecord.userId)
+                    .limit(1)
+                    .find();
+                if (emergencyProfileResult.items.length > 0) {
+                    const emergencyProfile = emergencyProfileResult.items[0];
+                    emergencyProfile.subscriptionActive = false;
+                    emergencyProfile.membershipTier = ""; // Clear tier or set to a default 'inactive'
+                    emergencyProfile.lastUpdated = new Date();
+                    await wixData.update(EMERGENCY_PROFILES_COLLECTION, emergencyProfile);
+                    console.log(`Backend: Emergency Profile for ${subscriberRecord.userId} marked as inactive.`);
+                } else {
+                    console.warn(`Backend: Emergency Profile not found for userId: ${subscriberRecord.userId} during cancellation.`);
+                }
+            } else {
+                console.warn(`Backend: No userId found in payfastSubscribers record for ${payfastSubscriptionId}. Cannot update Emergency_Profiles.`);
+            }
+
+            return { success: true, message: "Subscription cancelled and database updated.", memberName: memberName };
+        } else {
+            console.warn(`Backend: Subscriber with PayFast Subscription ID ${payfastSubscriptionId} not found in local ${SUBSCRIBERS_COLLECTION} database.`);
+            return { success: false, message: "Subscription cancelled by PayFast, but subscriber not found in local database for update." };
+        }
+
+    } catch (error) {
+        console.error("Backend: Error during PayFast subscription cancellation process:", error);
+        return { success: false, message: `Error cancelling subscription: ${error.message}` };
+    }
+}
+
+/**
+ * Fetches details for a specific PayFast subscription from the PayFast API.
+ *
+ * @param {string} payfastSubscriptionId - The PayFast token/subscription ID.
+ * @returns {Promise<Object>} An object containing subscription details or an error message.
+ */
+export async function fetchPayfastSubscriptionDetails(payfastSubscriptionId) {
+    console.log(`Backend: Attempting to fetch details for subscription: ${payfastSubscriptionId}`);
+
+    if (!payfastSubscriptionId) {
+        return { success: false, message: "PayFast Subscription ID is missing." };
+    }
+
+    try {
+        // Get PayFast credentials from centralized config
+        const { getPayFastConfig } = await import('./payfast-config.jsw');
+        const config = await getPayFastConfig();
+        const { merchantId, merchantKey } = config.getCredentials();
+
+        if (!merchantId || !merchantKey) {
+            throw new Error("PayFast Merchant ID or Merchant Key not found in configuration.");
+        }
+
+        const authString = btoa(`${merchantId}:${merchantKey}`);
+        // Use live API URL - PayFast doesn't have sandbox API for subscriptions
+        const fetchUrl = `https://api.payfast.co.za/subscriptions/${payfastSubscriptionId}/fetch`;
+
+        console.log(`Backend: Sending GET request to PayFast API: ${fetchUrl}`);
+
+        const response = await fetch(fetchUrl, {
+            method: 'GET',
+            headers: {
+                'Authorization': `Basic ${authString}`,
+                'Content-Type': 'application/json' // PayFast usually returns JSON for GET
+            }
+        });
+
+        let payfastResult;
+        if (response.headers.get('content-type')?.includes('application/json')) {
+            payfastResult = await response.json();
+        } else {
+            payfastResult = await response.text();
+        }
+        console.log("Backend: PayFast API fetch raw response:", payfastResult);
+
+        if (!response.ok) {
+            console.error(`Backend: PayFast API fetch failed: ${response.status} - ${JSON.stringify(payfastResult)}`);
+            let errorMessage = "Unknown error from PayFast API.";
+            if (typeof payfastResult === 'object' && payfastResult.message) {
+                errorMessage = payfastResult.message;
+            } else if (typeof payfastResult === 'string' && payfastResult.length > 0) {
+                errorMessage = payfastResult;
+            }
+            throw new Error(`PayFast API fetch failed: ${errorMessage}`);
+        }
+
+        console.log("Backend: PayFast API fetch successful. Details:", payfastResult);
+        // The actual subscription details are often nested under a 'data' or 'response' key
+        // You'll need to inspect the actual response structure from PayFast
+        // For example: return { success: true, data: payfastResult.data.response || payfastResult.data || payfastResult };
+        return { success: true, data: payfastResult }; // Return the raw result for now
+
+    } catch (error) {
+        console.error("Backend: Error during PayFast subscription fetch process:", error);
+        return { success: false, message: `Error fetching subscription details: ${error.message}` };
+    }
+}
