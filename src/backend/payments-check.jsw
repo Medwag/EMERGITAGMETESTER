@@ -1,78 +1,122 @@
 import { fetch } from 'wix-fetch';
 import wixSecretsBackend from 'wix-secrets-backend';
-import wixData from 'wix-data'; // ✅ <-- this fixes the error
+import wixData from 'wix-data';
 
 export async function checkPayments(userEmail) {
-  const [payfastRes, paystackRes] = await Promise.all([
+  const [localRes, payfastRes, paystackRes] = await Promise.all([
+    checkLocalProfile(userEmail),
     checkPayfast(userEmail),
     checkPaystack(userEmail)
   ]);
 
-  // Combine results
-  const signup = payfastRes.signup || paystackRes.signup || { found: false };
+  // Local profile is authoritative when true
+  const signup = localRes.signup || payfastRes.signup || paystackRes.signup || { found: false };
   const subscription = payfastRes.subscription || paystackRes.subscription || { found: false };
 
   return { signup, subscription };
 }
 
+async function checkLocalProfile(userEmail) {
+  try {
+    if (!userEmail) return {};
+    const q = await wixData
+      .query('Emergency_Profiles')
+      .or(
+        wixData.query('Emergency_Profiles').eq('emailAddress', userEmail),
+        wixData.query('Emergency_Profiles').eq('email', userEmail)
+      )
+      .limit(1)
+      .find({ suppressAuth: true });
+
+    if (!q.items.length) return {};
+    const p = q.items[0];
+    if (p.signUpPaid) {
+      return {
+        signup: {
+          found: true,
+          date: p.joinedDate ? new Date(p.joinedDate).toLocaleDateString() : undefined,
+          gateway: p.paymentProvider || 'Unknown'
+        }
+      };
+    }
+    return {};
+  } catch (e) {
+    console.warn('Local profile check failed:', e?.message || e);
+    return {};
+  }
+}
+
 async function checkPaystack(userEmail) {
-  const secretKey = await wixSecretsBackend.getSecret('PaystackLiveSKey');
-  const url = `https://api.paystack.co/transaction?customer=${encodeURIComponent(userEmail)}`;
-  
-  const res = await fetch(url, {
-    headers: { Authorization: `Bearer ${secretKey}` }
-  });
+  try {
+    if (!userEmail) return {};
+    const secretKey = await wixSecretsBackend.getSecret('PaystackLiveSKey');
+    const url = `https://api.paystack.co/transaction?email=${encodeURIComponent(userEmail)}&perPage=50`;
 
-  if (!res.ok) return {};
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${secretKey}` }
+    });
+    if (!res.ok) return {};
 
-  const data = await res.json();
-  const transactions = data.data || [];
-  if (transactions.length === 0) return {};
+    const data = await res.json();
+    const transactions = (data && data.data) || [];
+    if (!Array.isArray(transactions) || transactions.length === 0) return {};
 
-  const signupTx = transactions.find(tx => tx.metadata?.type === 'signup');
-  const subTx = transactions.find(tx => tx.metadata?.type === 'subscription');
+    const successful = transactions.filter(tx => (tx.status || '').toLowerCase() === 'success');
 
-  return {
-    signup: signupTx
-      ? {
-          found: true,
-          date: new Date(signupTx.paid_at).toLocaleDateString(),
-          gateway: 'Paystack'
-        }
-      : null,
-    subscription: subTx
-      ? {
-          found: true,
-          planName: subTx.plan?.name || 'Membership Plan',
-          amount: (subTx.amount / 100).toFixed(2),
-          date: new Date(subTx.paid_at).toLocaleDateString(),
-          gateway: 'Paystack'
-        }
-      : null
-  };
+    const signupTx = successful.find(tx =>
+      tx?.metadata?.transaction_type === 'signup_fee' ||
+      tx?.metadata?.intent === 'signup_payment' ||
+      (typeof tx?.reference === 'string' && tx.reference.startsWith('signup_fee_'))
+    );
+
+    const subTx = successful.find(tx =>
+      tx?.metadata?.transaction_type === 'subscription_fee' ||
+      !!tx?.plan
+    );
+
+    return {
+      signup: signupTx
+        ? {
+            found: true,
+            date: new Date(signupTx.paid_at || signupTx.created_at || Date.now()).toLocaleDateString(),
+            gateway: 'Paystack'
+          }
+        : null,
+      subscription: subTx
+        ? {
+            found: true,
+            planName: (subTx.plan && (subTx.plan.name || subTx.plan.plan_name)) || 'Membership Plan',
+            amount: (Number(subTx.amount) / 100).toFixed(2),
+            date: new Date(subTx.paid_at || subTx.created_at || Date.now()).toLocaleDateString(),
+            gateway: 'Paystack'
+          }
+        : null
+    };
+  } catch (e) {
+    console.warn('Paystack check failed:', e?.message || e);
+    return {};
+  }
 }
 
 async function checkPayfast(userEmail) {
-  const merchantId = await wixSecretsBackend.getSecret('payfast_merchant_id');
-  const merchantKey = await wixSecretsBackend.getSecret('payfast_merchant_key');
-  const passphrase = await wixSecretsBackend.getSecret('payfast_passphrase');
-
-  // ⚠️ Uses CMS fallback (Payfast has no public API for lookup)
+  // PayFast has no public search API; relies on CMS if available
   try {
-    const { items } = await wixData.query('Payfast_Transactions')
+    const { items } = await wixData
+      .query('Payfast_Transactions')
       .eq('customerEmail', userEmail)
-      .find();
+      .limit(10)
+      .find({ suppressAuth: true });
 
-    if (items.length === 0) return {};
+    if (!items || items.length === 0) return {};
 
-    const signupTx = items.find(i => i.transactionType === 'signup');
+    const signupTx = items.find(i => i.transactionType === 'signup' || i.intent === 'signup_payment');
     const subTx = items.find(i => i.transactionType === 'subscription');
 
     return {
       signup: signupTx
         ? {
             found: true,
-            date: new Date(signupTx.paymentDate).toLocaleDateString(),
+            date: signupTx.paymentDate ? new Date(signupTx.paymentDate).toLocaleDateString() : undefined,
             gateway: 'Payfast'
           }
         : null,
@@ -81,13 +125,14 @@ async function checkPayfast(userEmail) {
             found: true,
             planName: subTx.planName,
             amount: subTx.amount,
-            date: new Date(subTx.paymentDate).toLocaleDateString(),
+            date: subTx.paymentDate ? new Date(subTx.paymentDate).toLocaleDateString() : undefined,
             gateway: 'Payfast'
           }
         : null
     };
   } catch (e) {
-    console.error('Payfast CMS lookup error:', e);
+    // Collection may not exist on some sites
     return {};
   }
 }
+
