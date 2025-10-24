@@ -4,6 +4,7 @@ import { getPayFastConfig } from 'backend/payfast-config.jsw';
 import { parsePayFastITN, validatePayFastParams, validatePayFastIpAddress } from 'backend/payfastUtils.jsw';
 import { syncPayFastPayment } from 'backend/subscription-utils.jsw';
 import wixData from 'wix-data';
+import { ensureOnce, makeKeyFrom } from 'backend/_lib/idempotency.js';
 
 /**
  * Enhanced PayFast ITN handler for processing instant transaction notifications
@@ -69,6 +70,25 @@ export async function handlePayFastITN(itnData, sourceIp = '') {
             };
         }
         console.log(`🔐 [PayFast ITN] Signature validation passed`);
+
+        // Idempotency: ensure each unique ITN is processed once
+        try {
+            const uniqueId = parsedData.pf_payment_id || parsedData.payment_id || parsedData.m_payment_id || 'unknown';
+            const idemKey = makeKeyFrom('payfast', 'itn', uniqueId, parsedData.payment_status);
+            const claim = await ensureOnce(idemKey, 24 * 60 * 60); // 24h TTL
+            if (!claim.claimed) {
+                console.log(`[PayFast ITN] Idempotency: duplicate ITN suppressed`, { uniqueId, status: parsedData.payment_status });
+                return {
+                    success: true,
+                    duplicate: true,
+                    paymentId: parsedData.m_payment_id,
+                    status: parsedData.payment_status,
+                    processingTime: Date.now() - startTime
+                }; 
+            }
+        } catch (idemErr) {
+            console.warn('[PayFast ITN] Idempotency check failed (continuing):', idemErr?.message || idemErr);
+        }
 
         // Step 4: Process based on payment status
         const processingResult = await processPaymentStatus(parsedData);

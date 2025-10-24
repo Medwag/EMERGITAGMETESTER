@@ -1,5 +1,6 @@
 import wixData from 'wix-data';
 import { verifyPaystackTransaction, upsertEmergencyProfile } from 'backend/paystack-utils.jsw';
+import { ensureOnce, makeKeyFrom } from 'backend/_lib/idempotency.js';
 
 
 /**
@@ -11,6 +12,19 @@ export async function post_paystack(req) {
     const body = await req.body.json();   // parse JSON body
     const event = body.event;
     const data = body.data;
+
+    // Idempotency guard: ensure each webhook is processed once
+    try {
+      const ref = (data && (data.reference || data.id || data.subscription_code)) || 'unknown';
+      const key = makeKeyFrom('paystack', 'webhook', event, ref);
+      const claim = await ensureOnce(key, 24 * 60 * 60); // 24h TTL
+      if (!claim.claimed) {
+        console.log('Idempotency: duplicate Paystack webhook suppressed', { event, ref });
+        return { status: 200 };
+      }
+    } catch (idemErr) {
+      console.warn('Idempotency check failed (continuing):', idemErr?.message || idemErr);
+    }
 
     console.log(`📩 Paystack Webhook Event: ${event}`, data.reference);
 

@@ -1,19 +1,104 @@
 import { getSecret } from 'wix-secrets-backend';
 import { fetch } from 'wix-fetch';
 
-export async function sendDiscordLog(message) {
-  try {
-    const webhook = await getSecret("discord_webhook");
-    if (!webhook) throw new Error("Missing Discord webhook URL");
+const MAX_DISCORD_CONTENT = 2000;
+const TRUNCATION_SUFFIX = ' … [truncated]';
 
-    await fetch(webhook, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content: message })
+function inferPrefix(msg) {
+  try {
+    const m = String(msg || '');
+    const hasBracket = /^\s*\[.+?\]/.test(m);
+    if (hasBracket) return '';
+    const lower = m.toLowerCase();
+    if (lower.includes('payfast') && lower.includes('itn')) return '[PayFast ITN] ';
+    if (lower.includes('payfast')) return '[PayFast] ';
+    if (lower.includes('paystack') && lower.includes('webhook')) return '[Paystack Webhook] ';
+    if (lower.includes('paystack') && (lower.includes('sync') || lower.includes('subscription'))) return '[Paystack Sync] ';
+    if (lower.includes('idempotency') || lower.includes('purge')) return '[Cron] [Idempotency] ';
+    if (lower.includes('fallback') || lower.includes('cron')) return '[Cron] ';
+    if (lower.includes('payment')) return '[Payments] ';
+  } catch (_) {}
+  return '';
+}
+
+function normalizeContent(message) {
+  const str = String(message ?? '');
+  if (str.length <= MAX_DISCORD_CONTENT) return str;
+  const max = Math.max(0, MAX_DISCORD_CONTENT - TRUNCATION_SUFFIX.length);
+  return str.slice(0, max) + TRUNCATION_SUFFIX;
+}
+
+/**
+ * Send a log message to Discord via webhook.
+ * If a Discord thread ID is configured, post into that thread to consolidate logs.
+ * Applies safe truncation to respect Discord's 2000-char content limit.
+ *
+ * Secrets used:
+ *  - discord_webhook (required)
+ *  - discord_thread_id (optional) — if present, messages are posted to this thread
+ *  - discord_log_username / discord_username (optional default username)
+ *  - discord_log_avatar_url / discord_avatar_url (optional default avatar)
+ *
+ * @param {string} message
+ * @param {{ threadId?: string, username?: string, avatarUrl?: string }} [opts]
+ */
+export async function sendDiscordLog(message, opts = {}) {
+  try {
+    const webhook = await getSecret('discord_webhook');
+    if (!webhook) throw new Error('Missing Discord webhook URL');
+
+    // Derive thread id: prefer explicit option, else secret
+    let threadId = opts.threadId;
+    if (!threadId) {
+      try {
+        const fromSecret = await getSecret('discord_thread_id');
+        if (fromSecret) threadId = String(fromSecret).trim();
+      } catch (_) {
+        // ignore missing secret
+      }
+    }
+
+    let url = webhook;
+    if (threadId) {
+      const sep = webhook.includes('?') ? '&' : '?';
+      url = `${webhook}${sep}thread_id=${encodeURIComponent(threadId)}`;
+    }
+
+    // Resolve defaults
+    let username = opts.username;
+    if (!username) {
+      try {
+        const name1 = await getSecret('discord_log_username').catch(() => null);
+        const name2 = name1 || (await getSecret('discord_username').catch(() => null));
+        if (name2) username = String(name2);
+      } catch (_) {}
+    }
+
+    let avatarUrl = opts.avatarUrl;
+    if (!avatarUrl) {
+      try {
+        const av1 = await getSecret('discord_log_avatar_url').catch(() => null);
+        const av2 = av1 || (await getSecret('discord_avatar_url').catch(() => null));
+        if (av2) avatarUrl = String(av2);
+      } catch (_) {}
+    }
+
+    let content = normalizeContent(message);
+    const prefix = inferPrefix(content);
+    if (prefix) content = normalizeContent(prefix + content);
+
+    const payload = { content };
+    if (username) payload.username = username;
+    if (avatarUrl) payload.avatar_url = avatarUrl;
+
+    await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
     });
 
-    console.log("✅ Discord log sent:", message);
+    console.log('Discord log sent:', threadId ? `(thread ${threadId})` : '(no thread)', username ? `(as ${username})` : '', payload.content.length);
   } catch (err) {
-    console.error("❌ Discord log failed:", err.message);
+    console.error('Discord log failed:', err.message);
   }
 }

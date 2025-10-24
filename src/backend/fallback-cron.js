@@ -3,6 +3,7 @@ import wixData from 'wix-data';
 import { fetch } from 'wix-fetch';
 import { getSecret } from 'wix-secrets-backend';
 import { sendDiscordLog } from 'backend/logger.jsw';
+import { purgeExpired } from 'backend/_lib/idempotency.js';
 
 // 🔄 Every hour, re-check incomplete profiles
 export async function checkPaymentsJob() {
@@ -24,6 +25,30 @@ export async function checkPaymentsJob() {
     } catch (e) {
         console.error("❌ Fallback job error:", e);
         sendDiscordLog("❌ Fallback job error: " + e.message);
+    }
+}
+
+// -------------------------
+// IdempotencyKeys purge
+// -------------------------
+export async function purgeIdempotencyKeysJob(batchSize = 200, maxBatches = 10) {
+    try {
+        console.log('🧹 Running idempotency purge job...');
+        sendDiscordLog('🧹 Running idempotency purge job...');
+
+        let totalRemoved = 0;
+        for (let i = 0; i < maxBatches; i++) {
+            const { removed } = await purgeExpired(batchSize);
+            totalRemoved += removed;
+            if (!removed) break;
+        }
+
+        const msg = `✅ Idempotency purge complete. Removed: ${totalRemoved}`;
+        console.log(msg);
+        sendDiscordLog(msg);
+    } catch (e) {
+        console.error('❌ Idempotency purge error:', e);
+        sendDiscordLog('❌ Idempotency purge error: ' + e.message);
     }
 }
 

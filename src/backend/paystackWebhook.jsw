@@ -4,6 +4,7 @@ import wixSecretsBackend from 'wix-secrets-backend';
 import { sendEmail, sendWhatsAppAlert, sendDiscordAlert } from 'backend/notify.jsw';
 import { createHmac } from 'crypto';
 import { triggeredEmails } from 'wix-crm-frontend';
+import { ensureOnce, makeKeyFrom } from 'backend/_lib/idempotency.js';
 
 // Email template IDs
 const EMAIL_PAYMENT_SUCCESS = "UrDYTwt";
@@ -48,6 +49,19 @@ export async function post_paystackWebhook(request) {
     const md = data.metadata || {};
     const userId = md.userId;
     const membershipTier = md.membershipTier || "Bronze";
+
+    // Idempotency guard: ensure each webhook is processed once
+    try {
+      const ref = (data.reference || data.id || data.subscription_code || 'unknown');
+      const key = makeKeyFrom('paystack', 'webhook', type, ref);
+      const claim = await ensureOnce(key, 24 * 60 * 60); // 24h TTL
+      if (!claim.claimed) {
+        console.log('Idempotency: duplicate Paystack webhook suppressed', { type, ref });
+        return { status: 200, body: { ok: true, duplicate: true } };
+      }
+    } catch (idemErr) {
+      console.warn('Idempotency check failed (continuing):', idemErr?.message || idemErr);
+    }
 
     if (!userId) {
       console.error("❌ Webhook missing metadata.userId");
