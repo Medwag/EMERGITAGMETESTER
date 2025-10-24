@@ -101,8 +101,9 @@ export async function saveEmergencyProfile(profileData) {
         }
     }
 
+    // Preserve payment-related flags on update; do not reset signUpPaid inadvertently
     const profileToSave = {
-        ...baseProfile,
+        ...(baseProfile || {}),
         _owner: userId,
         userId,
         fullName,
@@ -113,7 +114,7 @@ export async function saveEmergencyProfile(profileData) {
         waConsent,
         homeAddress,
         deliveryAddress,
-        signUpPaid: false,
+        // Only set default created timestamp on first creation
         dateCreated: baseProfile?.dateCreated || new Date(),
         updatedAt: new Date(),
         publicViewId: publicViewId

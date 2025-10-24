@@ -14,6 +14,7 @@ import wixUsers from 'wix-users';
 import wixLocation from 'wix-location';
 import { saveEmergencyProfile } from 'backend/profile-utils.jsw';
 import { detectSignupPaymentDual } from 'backend/signup-payment-detector-dual.jsw';
+import { checkPayments } from 'backend/payments-check.jsw';
 
 // Safe element helper
 function el(selector) {
@@ -128,6 +129,22 @@ $w.onReady(async () => {
                     throw new Error('Please enter a valid South African phone number (e.g., 0XXXXXXXXX)');
                 }
                 
+                // Guard: if signup already paid, skip saving and redirect to plans
+                try {
+                    const precheck = await checkPayments(email);
+                    if (precheck?.signup?.found) {
+                        console.log('[SignUp] Signup already paid (pre-check), redirecting to membership plans');
+                        statusText?.text = 'You have already completed the sign-up payment. Redirecting to membership plans...';
+                        statusText?.show();
+                        submitBtn.enable();
+                        loadingSpinner?.hide();
+                        setTimeout(() => wixLocation.to('/membership-plans'), 1200);
+                        return;
+                    }
+                } catch (preErr) {
+                    console.warn('[SignUp] Pre-check failed, continuing to save profile:', preErr?.message || preErr);
+                }
+
                 // Save profile
                 console.log('[SignUp] Saving emergency profile...');
                 statusText?.text = 'Saving your information...';
