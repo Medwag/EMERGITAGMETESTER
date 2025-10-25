@@ -320,6 +320,74 @@ export async function recordPaymentEvent({
     await sendDiscordLog(`❌ recordPaymentEvent failed: ${err.message}`);
   }
 }
+/* ------------------------------------------------------------------
+   ✅ 7. Update MemberPayments After Successful Transactions
+------------------------------------------------------------------- */
+import { currentMember } from 'wix-members-backend';
+import wixData from 'wix-data';
+
+/**
+ * Marks the current member as having paid the sign-up fee.
+ */
+export async function onSignupPaymentSuccess() {
+  try {
+    const member = await currentMember.getMember();
+    if (!member) throw new Error('No member context found');
+    const memberId = member._id;
+
+    const result = await wixData.query('MemberPayments')
+      .eq('memberId', memberId)
+      .find();
+
+    if (result.items.length) {
+      const record = result.items[0];
+      record.signupPaid = true;
+      await wixData.update('MemberPayments', record);
+      console.log(`✅ Signup payment flag set for ${memberId}`);
+    } else {
+      // create record if missing
+      await wixData.insert('MemberPayments', {
+        memberId,
+        signupPaid: true,
+        subscriptionPaid: false
+      });
+      console.log(`🆕 MemberPayments record created for ${memberId}`);
+    }
+  } catch (err) {
+    console.error('❌ onSignupPaymentSuccess error:', err);
+  }
+}
+
+/**
+ * Marks the current member as having paid the subscription.
+ */
+export async function onSubscriptionPaymentSuccess() {
+  try {
+    const member = await currentMember.getMember();
+    if (!member) throw new Error('No member context found');
+    const memberId = member._id;
+
+    const result = await wixData.query('MemberPayments')
+      .eq('memberId', memberId)
+      .find();
+
+    if (result.items.length) {
+      const record = result.items[0];
+      record.subscriptionPaid = true;
+      await wixData.update('MemberPayments', record);
+      console.log(`✅ Subscription flag set for ${memberId}`);
+    } else {
+      await wixData.insert('MemberPayments', {
+        memberId,
+        signupPaid: false,
+        subscriptionPaid: true
+      });
+      console.log(`🆕 MemberPayments record created for ${memberId}`);
+    }
+  } catch (err) {
+    console.error('❌ onSubscriptionPaymentSuccess error:', err);
+  }
+}
 
 /* ------------------------------------------------------------------
    ✅ Default export for Velo interop
